@@ -1,0 +1,3 @@
+# Production environment — swap in your real deployment values locally.
+base_url: https://prod.example-api.internal
+api_token: placeholder-prod-token
