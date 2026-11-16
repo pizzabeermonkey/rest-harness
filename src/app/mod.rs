@@ -24,7 +24,14 @@
 //!
 //! [`tree`]: self::tree
 
+pub mod composer;
 pub mod tree;
+
+pub use self::composer::{
+    BodyEdit, BodyMode, BodyMotion, BodyView, ComposerMsg, EnvScope, EnvSelection, JsonToken,
+    JsonTokenKind, NameValue, PendingSave, ResponseState, ResponseView, StatusClass, SubTab, Tab,
+    TabKind, TabMsg,
+};
 
 use crate::config::SAMPLE_COLLECTION_NAME;
 use crate::domain::{HttpMethod, Request, Workspace};
@@ -112,9 +119,10 @@ pub enum SidebarMsg {
     FilterChanged(String),
     /// Expand/collapse a tree node.
     NodeToggled(PathBuf),
-    /// A Request row was clicked (open intent).
+    /// A Request row was clicked (open intent; the shell reads the file
+    /// and replies `Tab(TabMsg::Opened { .. })`).
     NodeActivated(PathBuf),
-    /// A History row was clicked.
+    /// A History row was clicked (also opens a HistoryDraft tab).
     HistoryEntrySelected(usize),
 }
 
@@ -135,6 +143,17 @@ pub enum CrudMsg {
     Delete(PathBuf),
 }
 
+/// Which section of an editor modal a row-level [`ModalMsg`] targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModalSlot {
+    /// Variables of the edited Environment.
+    EnvironmentVars,
+    /// Shared Collection secrets.
+    SharedSecrets,
+    /// Per-Environment secret overrides.
+    EnvironmentSecrets,
+}
+
 /// Messages driving the modal overlay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModalMsg {
@@ -144,11 +163,35 @@ pub enum ModalMsg {
     Confirm,
     /// Cancel (Esc / Cancel button): closes without side effects.
     Cancel,
+    /// `CloseDirty` modal: discard the changes and close the tab.
+    Discard,
+    /// `SaveDraft` modal: the target Collection was picked (index into the
+    /// modal's collection list).
+    TargetCollectionSelected(usize),
+    /// `SaveDraft` modal: the nested folder path text changed ("a/b").
+    FolderChanged(String),
+    /// The modal's name field changed (`SaveDraft` request name,
+    /// `EditEnvironments` new-environment name).
+    NameChanged(String),
+    /// `EditEnvironments` modal: another environment was picked to edit
+    /// (index into the modal's env list; `envs.len()` = "New
+    /// environment…").
+    ItemSelected(usize),
+    /// Append an empty row to the section.
+    RowAdded(ModalSlot),
+    /// Remove the row at the index from the section.
+    RowRemoved(ModalSlot, usize),
+    /// Change a row's name/key in the section.
+    RowKeyChanged(ModalSlot, usize, String),
+    /// Change a row's value in the section.
+    RowValueChanged(ModalSlot, usize, String),
 }
 
-/// Top-level Message enum, nested for extensibility. The follow-up composer
-/// task adds `Composer(..)` / `Tab(..)` variants here.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Top-level Message enum, nested for extensibility.
+///
+/// `Eq` is not derivable: `Composer(..)` carries [`ComposerMsg::BodyEdit`]
+/// with `f32` coordinates.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     /// Workspace bar messages.
     Workspace(WorkspaceMsg),
@@ -158,6 +201,10 @@ pub enum Message {
     Crud(CrudMsg),
     /// Modal overlay messages.
     Modal(ModalMsg),
+    /// Tab strip messages (open/close/focus tabs).
+    Tab(TabMsg),
+    /// Request composer messages (edits, send pipeline, save).
+    Composer(ComposerMsg),
 }
 
 /// What `update` asks the shell to do; the shell maps each to `iced::Task`s
@@ -182,6 +229,59 @@ pub enum Effect {
     Duplicate { path: PathBuf },
     /// Delete the node at `path` (after the confirm modal).
     Delete { path: PathBuf },
+    /// Read the Request file at `path` off-thread; the shell replies
+    /// `Message::Tab(TabMsg::Opened { .. })`.
+    OpenRequest { path: PathBuf },
+    /// Execute a prepared request for `tab_id` (the shell owns the
+    /// in-flight registry and its cancellation tokens).
+    SendRequest {
+        /// The sending tab.
+        tab_id: u64,
+        /// The fully resolved request.
+        prepared: crate::interpolation::PreparedHttpRequest,
+    },
+    /// Cancel the in-flight request of `tab_id` (its completion message is
+    /// still delivered by the select! arm).
+    CancelSend { tab_id: u64 },
+    /// Upsert the Request at `path` (a Saved tab's save).
+    SaveRequest {
+        /// Path of the request file.
+        path: PathBuf,
+        /// A copy of the current request.
+        request: Request,
+    },
+    /// Create a Request file (must NOT overwrite; draft save).
+    SaveDraft {
+        /// Target parent directory (Collection or nested Folder).
+        parent: PathBuf,
+        /// The request to create.
+        request: Request,
+    },
+    /// Append a History Entry (the redacting history store persists it
+    /// with `secret_values`), then reload the workspace.
+    AppendHistory {
+        /// The exchange to append (unredacted; redaction happens on write).
+        entry: crate::domain::HistoryEntry,
+        /// The tab's non-empty secret values.
+        secret_values: Vec<String>,
+    },
+    /// Write text to the system clipboard.
+    CopyText(String),
+    /// Persist an Environment of the Collection at `collection_dir`.
+    SaveEnvironment {
+        /// The Collection directory.
+        collection_dir: PathBuf,
+        /// The environment to save.
+        environment: crate::domain::Environment,
+    },
+    /// Persist the Collection's Secret store at `collection_dir` (always
+    /// `.secrets.yaml` — never anywhere else).
+    SaveSecrets {
+        /// The Collection directory.
+        collection_dir: PathBuf,
+        /// The store to save.
+        secrets: crate::domain::SecretStore,
+    },
     /// Show an informational line in the status strip.
     Notify(String),
 }
@@ -204,6 +304,51 @@ pub enum Modal {
     },
     /// Confirm deletion of the node at `path`.
     ConfirmDelete { path: PathBuf, kind: NodeKind },
+    /// Save a Draft tab as a Request: target Collection + nested folder
+    /// path ("a/b") + request name.
+    SaveDraft {
+        /// The draft tab being saved (promoted on the next `Loaded(Ok)`).
+        tab_id: u64,
+        /// Snapshot of the draft's request (name filled on confirm).
+        request: Request,
+        /// Candidate target Collection directories.
+        collections: Vec<PathBuf>,
+        /// Index into `collections` of the picked target.
+        target: usize,
+        /// Nested folder path text ("a/b", optional).
+        folder: String,
+        /// Request name buffer.
+        name: String,
+    },
+    /// A dirty tab is being closed: Save / Discard / Cancel.
+    CloseDirty { tab_id: u64 },
+    /// Edit the Environments of a Collection: pick the environment (or
+    /// "New environment…") and edit its variable rows.
+    EditEnvironments {
+        /// The Collection directory.
+        collection_dir: PathBuf,
+        /// Existing environment names.
+        envs: Vec<String>,
+        /// Index into `envs`; `envs.len()` means "New environment…".
+        selected: usize,
+        /// Name buffer for a new environment.
+        new_name: String,
+        /// Editable variable rows.
+        rows: Vec<NameValue>,
+    },
+    /// Edit a Collection's Secrets: shared secrets plus, when an
+    /// environment is selected, its per-environment overrides. Persisted
+    /// ONLY to `.secrets.yaml`.
+    EditSecrets {
+        /// The Collection directory.
+        collection_dir: PathBuf,
+        /// The environment whose overrides are edited, when any.
+        env_name: Option<String>,
+        /// Editable shared-secret rows.
+        shared_rows: Vec<NameValue>,
+        /// Editable per-environment secret rows.
+        env_rows: Vec<NameValue>,
+    },
 }
 
 /// The UI-agnostic application state.
@@ -226,11 +371,25 @@ pub struct AppState {
     pub status: Option<String>,
     /// Selected History row index.
     pub history_selected: Option<usize>,
-    /// Last activated Request path — the follow-up composer task consumes
-    /// this.
+    /// Last activated Request path (the shell reads it and replies
+    /// `Tab(TabMsg::Opened { .. })`).
     pub last_opened: Option<PathBuf>,
     /// HTTP method per Request path (populated by `Loaded`).
     pub request_methods: BTreeMap<PathBuf, HttpMethod>,
+    /// Open composer tabs (see [`composer`]).
+    pub tabs: Vec<Tab>,
+    /// The focused tab id.
+    pub active_tab: Option<u64>,
+    /// Monotonic tab id counter.
+    pub next_tab_id: u64,
+    /// The draft being saved, converted to `Saved` on the next
+    /// successful reload.
+    pub pending_save: Option<PendingSave>,
+    /// Tab ids whose dirty flag clears on the next successful reload
+    /// (saved via `Effect::SaveRequest`).
+    pub pending_saved: Vec<u64>,
+    /// The tab to close on the next successful reload (save-and-close).
+    pub pending_close: Option<u64>,
 }
 
 impl AppState {
@@ -250,6 +409,8 @@ impl AppState {
             Message::Sidebar(message) => self.update_sidebar(message),
             Message::Crud(message) => self.update_crud(message),
             Message::Modal(message) => self.update_modal(message),
+            Message::Tab(message) => self.update_tab(message),
+            Message::Composer(message) => self.update_composer(message),
         }
     }
 
@@ -267,6 +428,12 @@ impl AppState {
                 self.filter.clear();
                 self.last_opened = None;
                 self.history_selected = None;
+                // Tab references point into the old workspace; drop them.
+                self.tabs.clear();
+                self.active_tab = None;
+                self.pending_save = None;
+                self.pending_saved.clear();
+                self.pending_close = None;
                 vec![Effect::LoadWorkspace(root)]
             }
             WorkspaceMsg::PickedRoot(Err(error)) => {
@@ -317,24 +484,43 @@ impl AppState {
         }
 
         self.request_methods = request_methods;
-        self.workspace = Some(workspace);
+        self.workspace = Some(workspace.clone());
         self.status = None;
+
+        // Reconcile composer tabs with disk truth (pending save/close
+        // markers, vanished request files).
+        self.apply_composer_reload(&workspace);
     }
 
     fn update_sidebar(&mut self, message: SidebarMsg) -> Vec<Effect> {
         match message {
-            SidebarMsg::TabSelected(tab) => self.sidebar_tab = tab,
-            SidebarMsg::FilterChanged(filter) => self.filter = filter,
+            SidebarMsg::TabSelected(tab) => {
+                self.sidebar_tab = tab;
+                Vec::new()
+            }
+            SidebarMsg::FilterChanged(filter) => {
+                self.filter = filter;
+                Vec::new()
+            }
             SidebarMsg::NodeToggled(path) => {
                 // Toggle; `remove` returns true when it was present.
                 if !self.expanded.remove(&path) {
                     self.expanded.insert(path);
                 }
+                Vec::new()
             }
-            SidebarMsg::NodeActivated(path) => self.last_opened = Some(path),
-            SidebarMsg::HistoryEntrySelected(index) => self.history_selected = Some(index),
+            SidebarMsg::NodeActivated(path) => {
+                self.last_opened = Some(path.clone());
+                vec![Effect::OpenRequest { path }]
+            }
+            SidebarMsg::HistoryEntrySelected(index) => {
+                self.history_selected = Some(index);
+                // Open a HistoryDraft tab immediately, with no I/O: the
+                // entry's request/response snapshots prefill the tab.
+                self.open_history_entry(index);
+                Vec::new()
+            }
         }
-        Vec::new()
     }
 
     fn update_crud(&mut self, message: CrudMsg) -> Vec<Effect> {
@@ -412,9 +598,150 @@ impl AppState {
                 Some(Modal::NewFolder { name, .. }) => *name = text,
                 Some(Modal::NewRequest { name, .. }) => *name = text,
                 Some(Modal::Rename { buffer, .. }) => *buffer = text,
-                Some(Modal::ConfirmDelete { .. }) | None => {}
+                Some(Modal::SaveDraft { name, .. }) => *name = text,
+                Some(Modal::ConfirmDelete { .. })
+                | Some(Modal::CloseDirty { .. })
+                | Some(Modal::EditEnvironments { .. })
+                | Some(Modal::EditSecrets { .. })
+                | None => {}
             },
-            ModalMsg::Cancel => self.modal = None,
+            ModalMsg::Cancel => {
+                // Cancelling the save-draft modal abandons any pending
+                // close armed by the CloseDirty "Save" route (the tab
+                // stays open, still dirty).
+                if let Some(Modal::SaveDraft { tab_id, .. }) = self.modal.take() {
+                    if self.pending_close == Some(tab_id) {
+                        self.pending_close = None;
+                    }
+                }
+            }
+            ModalMsg::Discard => {
+                // CloseDirty only: drop the changes and close the tab.
+                if let Some(Modal::CloseDirty { tab_id }) = self.modal.take() {
+                    self.close_tab(tab_id);
+                }
+            }
+            ModalMsg::TargetCollectionSelected(index) => {
+                if let Some(Modal::SaveDraft { target, .. }) = &mut self.modal {
+                    *target = index;
+                }
+            }
+            ModalMsg::FolderChanged(folder) => {
+                if let Some(Modal::SaveDraft { folder: target, .. }) = &mut self.modal {
+                    *target = folder;
+                }
+            }
+            ModalMsg::NameChanged(name) => match &mut self.modal {
+                Some(Modal::SaveDraft { name: buffer, .. }) => *buffer = name,
+                Some(Modal::EditEnvironments { new_name, .. }) => *new_name = name,
+                _ => {}
+            },
+            ModalMsg::ItemSelected(index) => {
+                if let Some(Modal::EditEnvironments {
+                    collection_dir,
+                    envs,
+                    selected,
+                    new_name,
+                    rows,
+                }) = &mut self.modal
+                {
+                    let bounded = index.min(envs.len());
+                    *selected = bounded;
+                    *new_name = String::new();
+                    // Refresh the rows from the freshly loaded workspace.
+                    if let Some(collection) = self.workspace.as_ref().and_then(|workspace| {
+                        workspace
+                            .collections
+                            .iter()
+                            .find(|collection| collection.path == *collection_dir)
+                    }) {
+                        *rows = if bounded < envs.len() {
+                            collection
+                                .environments
+                                .iter()
+                                .find(|env| env.name == envs[bounded])
+                                .map(|env| {
+                                    env.variables
+                                        .iter()
+                                        .map(|(name, value)| NameValue {
+                                            name: name.clone(),
+                                            value: value.clone(),
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
+                    }
+                }
+            }
+            ModalMsg::RowAdded(slot) => match (slot, &mut self.modal) {
+                (ModalSlot::EnvironmentVars, Some(Modal::EditEnvironments { rows, .. })) => {
+                    rows.push(NameValue::default());
+                }
+                (ModalSlot::SharedSecrets, Some(Modal::EditSecrets { shared_rows, .. })) => {
+                    shared_rows.push(NameValue::default());
+                }
+                (ModalSlot::EnvironmentSecrets, Some(Modal::EditSecrets { env_rows, .. })) => {
+                    env_rows.push(NameValue::default());
+                }
+                _ => {}
+            },
+            ModalMsg::RowRemoved(slot, index) => match (slot, &mut self.modal) {
+                (ModalSlot::EnvironmentVars, Some(Modal::EditEnvironments { rows, .. })) => {
+                    if index < rows.len() {
+                        rows.remove(index);
+                    }
+                }
+                (ModalSlot::SharedSecrets, Some(Modal::EditSecrets { shared_rows, .. })) => {
+                    if index < shared_rows.len() {
+                        shared_rows.remove(index);
+                    }
+                }
+                (ModalSlot::EnvironmentSecrets, Some(Modal::EditSecrets { env_rows, .. }))
+                    if index < env_rows.len() =>
+                {
+                    env_rows.remove(index);
+                }
+                _ => {}
+            },
+            ModalMsg::RowKeyChanged(slot, index, name) => match (slot, &mut self.modal) {
+                (ModalSlot::EnvironmentVars, Some(Modal::EditEnvironments { rows, .. })) => {
+                    if let Some(row) = rows.get_mut(index) {
+                        row.name = name;
+                    }
+                }
+                (ModalSlot::SharedSecrets, Some(Modal::EditSecrets { shared_rows, .. })) => {
+                    if let Some(row) = shared_rows.get_mut(index) {
+                        row.name = name;
+                    }
+                }
+                (ModalSlot::EnvironmentSecrets, Some(Modal::EditSecrets { env_rows, .. })) => {
+                    if let Some(row) = env_rows.get_mut(index) {
+                        row.name = name;
+                    }
+                }
+                _ => {}
+            },
+            ModalMsg::RowValueChanged(slot, index, value) => match (slot, &mut self.modal) {
+                (ModalSlot::EnvironmentVars, Some(Modal::EditEnvironments { rows, .. })) => {
+                    if let Some(row) = rows.get_mut(index) {
+                        row.value = value;
+                    }
+                }
+                (ModalSlot::SharedSecrets, Some(Modal::EditSecrets { shared_rows, .. })) => {
+                    if let Some(row) = shared_rows.get_mut(index) {
+                        row.value = value;
+                    }
+                }
+                (ModalSlot::EnvironmentSecrets, Some(Modal::EditSecrets { env_rows, .. })) => {
+                    if let Some(row) = env_rows.get_mut(index) {
+                        row.value = value;
+                    }
+                }
+                _ => {}
+            },
             ModalMsg::Confirm => return self.confirm_modal(),
         }
         Vec::new()
@@ -492,8 +819,48 @@ impl AppState {
             }
             Some(Modal::ConfirmDelete { path, .. }) => {
                 self.modal = None;
+                // Tab references do not survive the deletion: close every
+                // Saved tab at or under the deleted path.
+                self.close_tabs_under(&path);
                 vec![Effect::Delete { path }]
             }
+            Some(Modal::SaveDraft { .. }) => self.confirm_save_draft(),
+            Some(Modal::CloseDirty { tab_id }) => self.confirm_close_dirty(tab_id),
+            Some(Modal::EditEnvironments { .. }) => self.confirm_edit_environments(),
+            Some(Modal::EditSecrets { .. }) => self.confirm_edit_secrets(),
+        }
+    }
+
+    /// The CloseDirty modal's Save action:
+    /// - Saved tab: emit `Effect::SaveRequest`, arm `pending_close` so the
+    ///   tab closes on the success reload.
+    /// - Draft tab: route to the save-draft modal (`pending_close` stays
+    ///   armed, so the tab closes after promotion).
+    /// - HistoryDraft: never saves — a no-op (the card hides the button).
+    fn confirm_close_dirty(&mut self, tab_id: u64) -> Vec<Effect> {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+            self.modal = None;
+            return Vec::new();
+        };
+        match &tab.kind {
+            TabKind::Saved { path } => {
+                self.modal = None;
+                self.pending_saved.push(tab_id);
+                self.pending_close = Some(tab_id);
+                vec![Effect::SaveRequest {
+                    path: path.clone(),
+                    request: tab.request.clone(),
+                }]
+            }
+            TabKind::Draft => {
+                // Route to the save-draft modal; `pending_close` is armed
+                // now so the tab closes on the reload following a
+                // successful promotion (cancelling the modal disarms it).
+                self.pending_close = Some(tab_id);
+                self.open_save_draft_modal(tab_id);
+                Vec::new()
+            }
+            TabKind::HistoryDraft => Vec::new(),
         }
     }
 
@@ -600,6 +967,23 @@ impl AppState {
         {
             if let Some(path) = &self.last_opened {
                 self.last_opened = Some(remap(path));
+            }
+        }
+
+        // Saved-tab references must survive the rename too (the request
+        // file's name field is rewritten by the storage layer when the
+        // file itself was renamed).
+        for tab in &mut self.tabs {
+            let TabKind::Saved { path } = &mut tab.kind else {
+                continue;
+            };
+            if path == old_path {
+                if kind == NodeKind::Request {
+                    tab.request.name = new_name.to_string();
+                }
+                *path = new_path.clone();
+            } else if path.starts_with(old_path) {
+                *path = remap(path);
             }
         }
     }
