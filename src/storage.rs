@@ -601,6 +601,11 @@ fn try_load_request_entry(path: &Path) -> Result<Option<RequestEntry>> {
 }
 
 /// Load and validate a full [`Request`] from a `.yaml` file.
+pub fn read_request(request_path: &Path) -> Result<Request> {
+    load_request(request_path)
+}
+
+/// Load and validate a full [`Request`] from a `.yaml` file.
 fn load_request(path: &Path) -> Result<Request> {
     let text = fs::read_to_string(path).map_err(|e| io_error(path, e))?;
     let request: Request = serde_yaml::from_str(&text)?;

@@ -484,7 +484,8 @@ impl Collection {
 }
 
 /// The Workspace: a root directory containing Collections plus the local
-/// (gitignored) History Entries.#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// (gitignored) History Entries.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Workspace {
     /// Absolute path of the Workspace root directory.
     pub root: PathBuf,

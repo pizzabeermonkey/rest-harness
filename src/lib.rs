@@ -10,7 +10,12 @@
 //!   sanitization and `.gitignore` management.
 //! - [`config`]: app config persistence and Workspace resolution/seeding.
 //! - [`history`]: gitignored History Entry store with Secret redaction.
+//! - [`app`]: UI-agnostic GUI core (`AppState` + `Message` + `Effect`
+//!   reducer, tree projection, CRUD/filter logic). This module — like the
+//!   rest of the crate — must stay free of `iced` types; the `iced` shell
+//!   lives in the binary's `gui` module (`src/gui/`).
 
+pub mod app;
 pub mod config;
 pub mod domain;
 pub mod error;
