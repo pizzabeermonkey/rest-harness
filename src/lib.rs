@@ -15,7 +15,10 @@ pub mod config;
 pub mod domain;
 pub mod error;
 pub mod history;
+pub mod http;
+pub mod interpolation;
 pub mod storage;
+pub mod url_query;
 
 pub use error::{Error, Result};
 
