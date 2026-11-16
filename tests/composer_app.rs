@@ -13,8 +13,8 @@ use rest_harness::app::{
     ModalMsg, SidebarMsg, TabKind, TabMsg, WorkspaceMsg,
 };
 use rest_harness::domain::{
-    Environment, HistoryEntry, HttpHeader, HttpMethod, RawContentType, RedactedHttpRequest,
-    Request, RequestBody,
+    Environment, HistoryEntry, HttpHeader, HttpMethod, KeyValueRow, RawContentType,
+    RedactedHttpRequest, Request, RequestBody,
 };
 use rest_harness::history::HistoryStore;
 use rest_harness::http::HttpResponseData;
@@ -846,7 +846,7 @@ fn send_errors_and_cancellations_reset_in_flight() {
 }
 
 #[test]
-fn history_selection_opens_a_prefilled_readonly_draft() {
+fn history_selection_opens_a_prefilled_detached_draft() {
     let dir = tempfile::tempdir().unwrap();
     seed_workspace(dir.path());
     seed_history(dir.path());
@@ -860,7 +860,6 @@ fn history_selection_opens_a_prefilled_readonly_draft() {
     assert_eq!(harness.state.history_selected, Some(0));
     let tab = harness.active();
     assert!(matches!(tab.kind, TabKind::HistoryDraft));
-    assert!(tab.is_readonly());
     assert!(!tab.dirty);
 
     // Prefilled from the entry: method, url, headers and the response.
@@ -880,7 +879,235 @@ fn history_selection_opens_a_prefilled_readonly_draft() {
     assert_eq!(response.size_bytes, 128);
     assert_eq!(response.body_pretty, "{}");
 
-    // History drafts never save.
-    let effects = harness.handle(Message::Composer(ComposerMsg::Save));
-    assert!(effects.is_empty());
+    // The Save action routes through the save-draft modal (a HistoryDraft
+    // is a detached draft, see the dedicated save tests below).
+    harness.run(Message::Composer(ComposerMsg::Save));
+    assert!(matches!(harness.state.modal, Some(Modal::SaveDraft { .. })));
+}
+
+#[test]
+fn history_draft_prefills_the_params_table_from_the_entry_url() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_workspace(dir.path());
+    let entry: HistoryEntry = rest_harness::history::build_entry(
+        RedactedHttpRequest {
+            method: HttpMethod::Get,
+            url: "https://example.com/orders?id=1&flag=x".to_string(),
+            headers: Vec::new(),
+            body: String::new(),
+        },
+        200,
+        "OK".to_string(),
+        9,
+        3,
+        Vec::new(),
+        "ok".to_string(),
+    );
+    HistoryStore::new(dir.path())
+        .append_entry(entry, &[])
+        .unwrap();
+
+    let mut harness = Harness::new(dir.path().to_path_buf());
+    harness.run(Message::Workspace(WorkspaceMsg::Reload));
+    harness.run(Message::Sidebar(SidebarMsg::HistoryEntrySelected(0)));
+
+    // The entry URL's query pairs prefill the Params table as enabled rows.
+    let tab = harness.active();
+    assert_eq!(
+        tab.request.params,
+        vec![KeyValueRow::new("id", "1"), KeyValueRow::new("flag", "x")]
+    );
+    assert!(tab.request.params.iter().all(|row| row.enabled));
+}
+
+#[test]
+fn opening_a_saved_request_syncs_url_and_params_from_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let (collection, _request) = seed_workspace(dir.path());
+    let storage = FsWorkspaceStorage;
+    // Saved with a query in the URL but an empty params table.
+    let with_query = storage
+        .create_request(
+            &collection,
+            &Request {
+                name: "With query".to_string(),
+                url: "https://example.com/list?id=7&flag=x".to_string(),
+                ..new_request("")
+            },
+        )
+        .unwrap();
+    // Saved with enabled params the URL does not carry.
+    let with_params = storage
+        .create_request(
+            &collection,
+            &Request {
+                name: "With params".to_string(),
+                url: "https://example.com/list".to_string(),
+                params: vec![KeyValueRow::new("a", "1")],
+                ..new_request("")
+            },
+        )
+        .unwrap();
+    let mut harness = Harness::new(dir.path().to_path_buf());
+    harness.run(Message::Workspace(WorkspaceMsg::Reload));
+
+    // Empty params + `?` in the URL: the params table is populated.
+    harness.run(Message::Sidebar(SidebarMsg::NodeActivated(with_query)));
+    assert_eq!(
+        harness.active().request.params,
+        vec![KeyValueRow::new("id", "7"), KeyValueRow::new("flag", "x")]
+    );
+
+    // Enabled params + a stale URL: the URL is rebuilt from the table.
+    harness.run(Message::Sidebar(SidebarMsg::NodeActivated(with_params)));
+    let tab = harness.active();
+    assert_eq!(tab.request.url, "https://example.com/list?a=1");
+    assert_eq!(tab.request.params, vec![KeyValueRow::new("a", "1")]);
+}
+
+#[test]
+fn history_draft_save_opens_the_save_draft_modal() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_workspace(dir.path());
+    seed_history(dir.path());
+    let mut harness = Harness::new(dir.path().to_path_buf());
+    harness.run(Message::Workspace(WorkspaceMsg::Reload));
+    harness.run(Message::Sidebar(SidebarMsg::HistoryEntrySelected(0)));
+
+    // Save on a HistoryDraft opens the save-draft modal (never upserts).
+    harness.run(Message::Composer(ComposerMsg::Save));
+    let Some(Modal::SaveDraft { tab_id, name, .. }) = harness.state.modal.clone() else {
+        panic!("save-draft modal expected");
+    };
+    assert_eq!(tab_id, harness.active_id());
+    assert_eq!(name, "", "history drafts start with an empty name");
+}
+
+#[test]
+fn history_draft_save_creates_the_request_and_promotes_the_tab() {
+    let dir = tempfile::tempdir().unwrap();
+    let (collection, _request) = seed_workspace(dir.path());
+    seed_history(dir.path());
+    let mut harness = Harness::new(dir.path().to_path_buf());
+    harness.run(Message::Workspace(WorkspaceMsg::Reload));
+    harness.run(Message::Sidebar(SidebarMsg::HistoryEntrySelected(0)));
+
+    harness.run(Message::Composer(ComposerMsg::Save));
+    harness.run(Message::Modal(ModalMsg::NameChanged(
+        "Orders replay".into(),
+    )));
+    let effects = harness.handle(Message::Modal(ModalMsg::Confirm));
+    let target = request_path_of(&collection, "Orders replay");
+    match &effects[..] {
+        [Effect::SaveDraft { parent, request }] => {
+            assert_eq!(parent, &collection);
+            assert_eq!(request.name, "Orders replay");
+            assert_eq!(request.url, "https://example.com/orders");
+        }
+        other => panic!("unexpected effects: {other:?}"),
+    }
+    assert_eq!(
+        harness.state.pending_save,
+        Some(rest_harness::app::PendingSave {
+            tab_id: harness.active_id(),
+            path: target.clone(),
+        })
+    );
+
+    // The success reload promotes the tab to Saved at the created path.
+    for effect in effects {
+        harness.execute(effect);
+    }
+    let tab = harness.active();
+    assert_eq!(
+        tab.kind,
+        TabKind::Saved {
+            path: target.clone()
+        }
+    );
+    assert!(!tab.dirty);
+    assert!(target.is_file(), "the request file was created");
+    assert!(harness.workspace().collections[0]
+        .requests
+        .iter()
+        .any(|r| r.name == "Orders replay"));
+}
+
+#[test]
+fn history_draft_save_does_not_overwrite_an_existing_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let (collection, _request) = seed_workspace(dir.path());
+    let existing = FsWorkspaceStorage
+        .create_request(
+            &collection,
+            &Request {
+                name: "Orders".to_string(),
+                url: "https://example.com/orders-original".to_string(),
+                ..new_request("")
+            },
+        )
+        .unwrap();
+    seed_history(dir.path());
+    let mut harness = Harness::new(dir.path().to_path_buf());
+    harness.run(Message::Workspace(WorkspaceMsg::Reload));
+    harness.run(Message::Sidebar(SidebarMsg::HistoryEntrySelected(0)));
+
+    harness.run(Message::Composer(ComposerMsg::Save));
+    harness.run(Message::Modal(ModalMsg::NameChanged("Orders".into())));
+    let effects = harness.handle(Message::Modal(ModalMsg::Confirm));
+    assert!(effects.is_empty(), "create_request must not be emitted");
+    assert!(
+        harness
+            .state
+            .status
+            .as_deref()
+            .is_some_and(|status| status.contains("already exists")),
+        "collision reported: {:?}",
+        harness.state.status
+    );
+    assert!(harness.state.modal.is_some(), "modal stays open");
+    // The existing request file is untouched.
+    assert_eq!(
+        rest_harness::storage::read_request(&existing).unwrap().url,
+        "https://example.com/orders-original"
+    );
+}
+
+#[test]
+fn close_guard_save_on_a_history_draft_routes_to_save_draft() {
+    let dir = tempfile::tempdir().unwrap();
+    let (collection, _request) = seed_workspace(dir.path());
+    seed_history(dir.path());
+    let mut harness = Harness::new(dir.path().to_path_buf());
+    harness.run(Message::Workspace(WorkspaceMsg::Reload));
+    harness.run(Message::Sidebar(SidebarMsg::HistoryEntrySelected(0)));
+
+    // Make the HistoryDraft dirty, then close: the guard opens.
+    harness.run(Message::Composer(ComposerMsg::UrlChanged(
+        "https://example.com/orders?edit=1".to_string(),
+    )));
+    let id = harness.active_id();
+    harness.run(Message::Tab(TabMsg::Close(id)));
+    assert!(matches!(
+        harness.state.modal,
+        Some(Modal::CloseDirty { .. })
+    ));
+
+    // "Save" routes to the save-draft modal, arming the close.
+    let effects = harness.handle(Message::Modal(ModalMsg::Confirm));
+    assert!(effects.is_empty(), "no effect until the draft is named");
+    assert!(matches!(harness.state.modal, Some(Modal::SaveDraft { .. })));
+    assert_eq!(harness.state.pending_close, Some(id));
+
+    // Name and confirm: the reload promotes AND closes the tab.
+    harness.run(Message::Modal(ModalMsg::NameChanged(
+        "Orders edited".into(),
+    )));
+    let effects = harness.handle(Message::Modal(ModalMsg::Confirm));
+    assert!(matches!(effects[..], [Effect::SaveDraft { .. }]));
+    for effect in effects {
+        harness.execute(effect);
+    }
+    assert!(harness.state.tabs.is_empty(), "closed after promotion");
+    assert!(request_path_of(&collection, "Orders edited").is_file());
 }

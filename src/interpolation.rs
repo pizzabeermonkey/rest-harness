@@ -120,7 +120,17 @@ pub fn prepare(
         return Err(Error::MissingVariables { variables: missing });
     }
 
-    let mut url = interpolate(&request.url, variables);
+    // The enabled param rows are the URL's query (see `crate::url_query`):
+    // reconcile them into the URL before interpolating, so programmatic /
+    // YAML callers whose `params` have enabled rows (or `{{variable}}`
+    // tokens in values) still send those params. With no enabled rows the
+    // URL is passed through untouched.
+    let effective_url = if request.params.iter().any(|row| row.enabled) {
+        crate::url_query::sync_params_to_url(&request.url, &request.params)
+    } else {
+        request.url.clone()
+    };
+    let mut url = interpolate(&effective_url, variables);
     if !has_scheme(&url) {
         // Schemeless URLs (e.g. `127.0.0.1:8080/ping`, `example.com/x`)
         // default to plain HTTP.
@@ -549,6 +559,38 @@ mod tests {
             .iter()
             .any(|h| h.name == "X-Token" && h.value == "t1"));
         assert_eq!(prepared.body, Some(r#"{"id": "42"}"#.to_string()));
+    }
+
+    #[test]
+    fn enabled_params_are_merged_into_the_prepared_url() {
+        let variables = vars(&[("token", "T1")]);
+        let request = Request {
+            url: "https://x/path".into(),
+            params: vec![
+                // Literal special chars are percent-encoded by url_query's
+                // rules before interpolation.
+                KeyValueRow::new("q", "a b"),
+                // A `{{var}}` in the value survives encoding (the braces do)
+                // and is interpolated into the URL.
+                KeyValueRow::new("t", "{{token}}"),
+                // Disabled rows are never part of the URL.
+                disabled("off", "gone"),
+            ],
+            ..Request::default()
+        };
+        let prepared = prepare(&request, &variables).unwrap();
+        assert_eq!(prepared.url, "https://x/path?q=a%20b&t=T1");
+    }
+
+    #[test]
+    fn without_enabled_params_the_url_is_passed_through_untouched() {
+        let request = Request {
+            url: "https://x/path?keep=1".into(),
+            params: vec![disabled("off", "gone")],
+            ..Request::default()
+        };
+        let prepared = prepare(&request, &BTreeMap::new()).unwrap();
+        assert_eq!(prepared.url, "https://x/path?keep=1");
     }
 
     #[test]
