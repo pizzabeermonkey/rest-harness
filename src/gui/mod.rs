@@ -35,6 +35,7 @@
 
 pub mod composer;
 pub mod modal;
+pub mod screenshot;
 pub mod sidebar;
 pub mod topbar;
 
