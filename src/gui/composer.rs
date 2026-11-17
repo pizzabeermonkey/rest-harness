@@ -19,6 +19,8 @@ use rest_harness::domain::{HttpMethod, RequestBody};
 
 use crate::gui::App;
 
+use super::style;
+
 /// All methods offered by the method pick list.
 const METHODS: [HttpMethod; 7] = [
     HttpMethod::Get,
@@ -86,13 +88,13 @@ fn tab_strip(state: &AppState) -> Element<'_, Message> {
                     if selected {
                         button::primary(theme, status)
                     } else {
-                        button::secondary(theme, status)
+                        style::secondary(theme, status)
                     }
                 })
                 .padding(4),
         );
         strip = strip.push(
-            button(text("✕").size(10))
+            button(text("×").size(10))
                 .on_press(Message::Tab(TabMsg::Close(tab.id)))
                 .style(button::text)
                 .padding(2),
@@ -139,7 +141,7 @@ fn header<'a>(state: &'a AppState, tab: &'a Tab) -> Element<'a, Message> {
     actions = actions.push(
         button(text("Save").size(12))
             .on_press(Message::Composer(ComposerMsg::Save))
-            .style(button::secondary)
+            .style(style::secondary)
             .padding(6),
     );
 
@@ -151,7 +153,7 @@ fn header<'a>(state: &'a AppState, tab: &'a Tab) -> Element<'a, Message> {
     let scoped = tab.env.is_some();
     let edit_button = |label: &'static str, enabled: bool, message: Message| {
         let mut button = button(text(label).size(11))
-            .style(button::secondary)
+            .style(style::secondary)
             .padding(4);
         if enabled {
             button = button.on_press(message);
@@ -270,7 +272,7 @@ fn editor_area<'a>(app: &'a App, tab: &'a Tab) -> iced::widget::Column<'a, Messa
                 if selected {
                     button::primary(theme, status)
                 } else {
-                    button::secondary(theme, status)
+                    style::secondary(theme, status)
                 }
             })
             .padding(4)
@@ -329,7 +331,7 @@ fn kv_row(
             .on_input(description_changed)
             .size(12)
             .width(Length::FillPortion(3)),
-        button(text("✕").size(10))
+        button(text("×").size(10))
             .on_press(removed)
             .style(button::text)
             .padding(2),
@@ -359,7 +361,7 @@ fn params_editor(tab: &Tab) -> Element<'static, Message> {
     list = list.push(
         button(text("+ Add param").size(11))
             .on_press(Message::Composer(ComposerMsg::ParamAdded))
-            .style(button::secondary)
+            .style(style::secondary)
             .padding(4),
     );
     scrollable(list).height(iced::Fill).into()
@@ -384,7 +386,7 @@ fn headers_editor(tab: &Tab) -> Element<'static, Message> {
     list = list.push(
         button(text("+ Add header").size(11))
             .on_press(Message::Composer(ComposerMsg::HeaderAdded))
-            .style(button::secondary)
+            .style(style::secondary)
             .padding(4),
     );
     scrollable(list).height(iced::Fill).into()
@@ -402,7 +404,7 @@ fn body_editor<'a>(app: &'a App, tab: &'a Tab) -> Element<'a, Message> {
                 if selected {
                     button::primary(theme, status)
                 } else {
-                    button::secondary(theme, status)
+                    style::secondary(theme, status)
                 }
             })
             .padding(4)
@@ -535,7 +537,7 @@ fn response_pane<'a>(tab: &'a Tab) -> iced::widget::Column<'a, Message> {
                 if selected {
                     button::primary(theme, status)
                 } else {
-                    button::secondary(theme, status)
+                    style::secondary(theme, status)
                 }
             })
             .padding(4)
@@ -574,7 +576,7 @@ fn response_pane<'a>(tab: &'a Tab) -> iced::widget::Column<'a, Message> {
                         if selected {
                             button::primary(theme, status)
                         } else {
-                            button::secondary(theme, status)
+                            style::secondary(theme, status)
                         }
                     })
                     .padding(4)
@@ -584,7 +586,7 @@ fn response_pane<'a>(tab: &'a Tab) -> iced::widget::Column<'a, Message> {
                 body_button("Raw", BodyView::Raw),
                 button(text("Copy").size(11))
                     .on_press(Message::Composer(ComposerMsg::CopyBody))
-                    .style(button::secondary)
+                    .style(style::secondary)
                     .padding(4),
             ]
             .spacing(4);

@@ -8,6 +8,8 @@ use rest_harness::app::tree::{build_tree, SidebarNode};
 use rest_harness::app::{AppState, CrudMsg, Message, NodeKind, SidebarMsg, SidebarTab};
 use rest_harness::domain::HttpMethod;
 
+use super::style;
+
 /// Width of the sidebar column.
 const SIDEBAR_WIDTH: f32 = 320.0;
 
@@ -70,7 +72,7 @@ fn collections_view(state: &AppState) -> Element<'_, Message> {
             .size(12),
         button(text("+ New Collection").size(12))
             .on_press(Message::Crud(CrudMsg::NewCollection))
-            .style(button::secondary)
+            .style(style::secondary)
             .width(Length::Fill)
             .padding(4),
         tree_view(state),
@@ -127,7 +129,7 @@ fn push_node(
     tree
 }
 
-/// One tree row: indent, chevron, name, badges, action glyphs.
+/// One tree row: indent, chevron, name, badges, action buttons.
 /// Everything is owned, so the element is `<'static>`.
 fn tree_row(state: &AppState, node: &SidebarNode) -> Element<'static, Message> {
     let indent = node.depth as f32 * INDENT_PER_DEPTH;
@@ -138,7 +140,7 @@ fn tree_row(state: &AppState, node: &SidebarNode) -> Element<'static, Message> {
         _ => {
             let open = node.force_expanded || state.expanded.contains(&node.path);
             let mut button = button(
-                text(if open { "▾" } else { "▸" })
+                text(if open { "v" } else { ">" })
                     .size(10)
                     .style(text::secondary),
             )
@@ -188,7 +190,7 @@ fn tree_row(state: &AppState, node: &SidebarNode) -> Element<'static, Message> {
         }
     }
     actions = actions.push(action_button(
-        "✎",
+        "ren",
         Message::Crud(CrudMsg::Rename(node.path.clone())),
     ));
     // User Story 9: no Duplicate on a Collection (duplicating a Collection
@@ -196,12 +198,12 @@ fn tree_row(state: &AppState, node: &SidebarNode) -> Element<'static, Message> {
     // Delete stay available everywhere.
     if matches!(node.kind, NodeKind::Folder | NodeKind::Request) {
         actions = actions.push(action_button(
-            "⧉",
+            "dup",
             Message::Crud(CrudMsg::Duplicate(node.path.clone())),
         ));
     }
     actions = actions.push(action_button(
-        "✕",
+        "×",
         Message::Crud(CrudMsg::Delete(node.path.clone())),
     ));
 

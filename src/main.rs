@@ -26,6 +26,7 @@ fn main() -> iced::Result {
     iced::application(gui::boot, gui::update, gui::view)
         .title("REST Harness")
         .theme(|_: &gui::App| iced::Theme::Dark)
+        .default_font(iced::Font::with_name("Fira Sans"))
         .window_size(iced::Size::new(1200.0, 800.0))
         .subscription(gui::subscription)
         .run()

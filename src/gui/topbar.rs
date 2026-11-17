@@ -6,6 +6,8 @@ use iced::widget::{button, container, text, tooltip};
 use iced::{alignment, Element, Length, Theme};
 use rest_harness::app::{AppState, Message, TabMsg, WorkspaceMsg};
 
+use super::style;
+
 /// Render the top bar.
 pub fn view(state: &AppState) -> Element<'_, Message> {
     let root_label = state
@@ -16,7 +18,7 @@ pub fn view(state: &AppState) -> Element<'_, Message> {
 
     let new_button = button(text("+ New").size(12))
         .on_press(Message::Tab(TabMsg::NewDraft))
-        .style(button::secondary);
+        .style(style::secondary);
 
     container(
         iced::widget::row![
@@ -31,10 +33,10 @@ pub fn view(state: &AppState) -> Element<'_, Message> {
             ),
             button("Switch Workspace…")
                 .on_press(Message::Workspace(WorkspaceMsg::PickWorkspace))
-                .style(button::secondary),
+                .style(style::secondary),
             button("Reload Workspace")
                 .on_press(Message::Workspace(WorkspaceMsg::Reload))
-                .style(button::secondary),
+                .style(style::secondary),
         ]
         .align_y(alignment::Vertical::Center)
         .spacing(8)
