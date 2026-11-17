@@ -1,20 +1,19 @@
-//! Minimal placeholder binary for REST Harness v1.
-//!
-//! The `iced` GUI arrives in a later task; for now the binary prints the
-//! crate version and usage so the package builds as an application.
+//! REST Harness desktop entry point — a thin bootstrap. All program wiring
+//! (boot/update/view/subscription) lives in the `gui` module (`src/gui/`);
+//! the UI-agnostic reducer lives in the lib crate (`rest_harness::app`).
 
-fn main() {
+mod gui;
+
+fn main() -> iced::Result {
     if std::env::args().nth(1).as_deref() == Some("--version") {
         println!("rest-harness {}", rest_harness::VERSION);
-        return;
+        return Ok(());
     }
-    println!(
-        "rest-harness {} (GUI coming in a later task)",
-        rest_harness::VERSION
-    );
-    println!();
-    println!("usage: rest-harness [--version]");
-    println!();
-    println!("Library crate `rest_harness` provides the domain model, YAML");
-    println!("workspace storage, secrets and history persistence.");
+
+    iced::application(gui::boot, gui::update, gui::view)
+        .title("REST Harness")
+        .theme(|_: &gui::App| iced::Theme::Dark)
+        .window_size(iced::Size::new(1200.0, 800.0))
+        .subscription(gui::subscription)
+        .run()
 }
