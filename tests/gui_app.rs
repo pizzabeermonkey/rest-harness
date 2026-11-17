@@ -7,7 +7,7 @@
 
 use rest_harness::app::{
     new_request, tree, AppState, CrudMsg, Effect, LoadedWorkspace, Message, Modal, ModalMsg,
-    NodeKind, SidebarMsg, SidebarTab, WorkspaceMsg,
+    NodeKind, SidebarMsg, SidebarTab, TabMsg, WorkspaceMsg,
 };
 use rest_harness::domain::{HistoryEntry, HttpHeader, HttpMethod, RedactedHttpRequest, Request};
 use rest_harness::history::{build_entry, HistoryStore};
@@ -96,6 +96,52 @@ impl Harness {
                 }
                 self.reload();
             }
+            Effect::OpenRequest { path } => {
+                // The shell reads the request off-thread and replies
+                // `Tab(TabMsg::Opened { .. })`.
+                let request = read_request(&path).map_err(|error| error.to_string());
+                self.state.update(Message::Tab(TabMsg::Opened {
+                    path: path.clone(),
+                    request,
+                }));
+            }
+            Effect::SaveRequest { path, request } => {
+                let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
+                storage.save_request(&parent, &request).unwrap();
+                self.reload();
+            }
+            Effect::SaveDraft { parent, request } => {
+                storage.create_request(&parent, &request).unwrap();
+                self.reload();
+            }
+            Effect::AppendHistory {
+                entry,
+                secret_values,
+            } => {
+                HistoryStore::new(&self.root)
+                    .append_entry(entry, &secret_values)
+                    .unwrap();
+                self.reload();
+            }
+            Effect::SaveEnvironment {
+                collection_dir,
+                environment,
+            } => {
+                storage
+                    .save_environment(&collection_dir, &environment)
+                    .unwrap();
+                self.reload();
+            }
+            Effect::SaveSecrets {
+                collection_dir,
+                secrets,
+            } => {
+                storage.save_secrets(&collection_dir, &secrets).unwrap();
+                self.reload();
+            }
+            // Shell-only effects (network, clipboard, cancellation): not
+            // exercised by the reducer tests.
+            Effect::SendRequest { .. } | Effect::CancelSend { .. } | Effect::CopyText(_) => {}
             Effect::PickWorkspaceFolder | Effect::Notify(_) => {}
         }
     }

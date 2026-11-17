@@ -1,10 +1,10 @@
 //! Top workspace bar: app title, workspace root label, workspace switching
-//! and reload. The `+ New` button is a disabled placeholder for the Request
-//! composer task.
+//! and reload. The `+ New` button opens a new untitled Draft tab in the
+//! request composer.
 
 use iced::widget::{button, container, text, tooltip};
 use iced::{alignment, Element, Length, Theme};
-use rest_harness::app::{AppState, Message, WorkspaceMsg};
+use rest_harness::app::{AppState, Message, TabMsg, WorkspaceMsg};
 
 /// Render the top bar.
 pub fn view(state: &AppState) -> Element<'_, Message> {
@@ -15,14 +15,8 @@ pub fn view(state: &AppState) -> Element<'_, Message> {
         .unwrap_or_else(|| "No workspace open".to_string());
 
     let new_button = button(text("+ New").size(12))
-        // Disabled until the composer task wires it up.
-        .style(|theme: &Theme, status| match status {
-            button::Status::Active => button::Style {
-                text_color: theme.extended_palette().background.strong.color,
-                ..button::text(theme, status)
-            },
-            _ => button::text(theme, status),
-        });
+        .on_press(Message::Tab(TabMsg::NewDraft))
+        .style(button::secondary);
 
     container(
         iced::widget::row![
@@ -32,8 +26,8 @@ pub fn view(state: &AppState) -> Element<'_, Message> {
                 .padding(iced::padding::left(6)),
             tooltip(
                 new_button,
-                text("Enabled in the next increment").size(11),
-                tooltip::Position::Bottom,
+                text("New draft request").size(11),
+                tooltip::Position::Bottom
             ),
             button("Switch Workspace…")
                 .on_press(Message::Workspace(WorkspaceMsg::PickWorkspace))

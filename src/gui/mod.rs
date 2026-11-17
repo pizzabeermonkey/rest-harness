@@ -2,55 +2,83 @@
 //!
 //! Thin adapter between the UI-agnostic app core (`rest_harness::app`) and
 //! `iced` 0.14: maps `Message` → reducer → `Effect`s → `iced::Task`s, and
-//! renders top bar, sidebar and modal overlay. All `iced` `use` statements
-//! live here (and in `src/main.rs`); the lib crate stays `iced`-free.
+//! renders top bar, sidebar, request composer and modal overlay. All
+//! `iced` `use` statements live here (and in `src/main.rs`); the lib crate
+//! stays `iced`-free.
 //!
-//! # Extension points for the next increment (Request composer)
+//! # Composer shell responsibilities
 //!
-//! - **Messages**: `Message` is nested. Add `Composer(ComposerMsg)` /
-//!   `Tab(TabMsg)` variants to `rest_harness::app::Message`, a match arm in
-//!   `AppState::update`, and a wrapper here if it needs shell work.
-//! - **Open intent**: clicking a Request row sends
-//!   `Sidebar(SidebarMsg::NodeActivated(path))`, which records
-//!   `AppState::last_opened`. The composer consumes `last_opened` to open
-//!   the request; the placeholder pane in [`right_pane`] shows the notice.
-//! - **Effects**: new shell-side work = new `Effect` variant in
-//!   `rest_harness::app::Effect`, mapped to `Task`s in
-//!   [`execute_effect`] below. CRUD effects all funnel through
-//!   [`storage_task`], which executes the work off the UI thread and
-//!   reloads the workspace from disk on success (`Loaded(Ok)`) or reports
-//!   the error into the status strip (`Loaded(Err)`).
-//! - **Requests on disk**: `Effect::CreateRequest` writes
-//!   [`new_request(name)`] (empty URL, GET). The composer replaces the URL
-//!   via the storage layer afterwards.
-//! - **Placeholder**: [`right_pane`] is the pane to replace; `topbar.rs`
-//!   has the disabled `+ New` button waiting for the composer.
+//! - **In-flight sends**: the shell owns the in-flight registry
+//!   (`HashMap<tab id, CancellationToken>`) on [`App`]; the core stays
+//!   pure. `Effect::SendRequest` runs the request inside a
+//!   `tokio::select!` against the token's `cancelled()` future, replying
+//!   `SendFinished`/`SendCancelled`.
+//! - **Body editor**: the shell keeps one `text_editor::Content` per tab
+//!   (the core stays `iced`-free). The editor's `on_edit` closure maps the
+//!   (iced-typed) action into the core-owned [`BodyEdit`] mirror; `update`
+//!   intercepts `ComposerMsg::BodyEdit`, performs the action on the
+//!   shell-owned content and forwards the resulting text to the reducer as
+//!   `ComposerMsg::BodyTextChanged`.
+//! - **Keyboard**: `Ctrl+R` reloads the workspace, `Ctrl+S` saves the
+//!   active tab, `Esc` cancels a modal. `keyboard::listen` only receives
+//!   events the widgets ignore, so focused text inputs still let these
+//!   through; the closures stay non-capturing as iced requires (see the
+//!   `check_zero_sized` note in the original Ctrl+R wiring).
 //!
-//! [`new_request(name)`]: rest_harness::app::new_request
+//! # Quit-with-dirty-tabs limitation
+//!
+//! iced 0.14 offers no way to veto a window close request (the close
+//! event cannot be intercepted and turned into a Task that keeps the
+//! window open), so quitting the app with dirty tabs cannot show the
+//! CloseDirty modal. This is a documented limitation; explicit tab closes
+//! are still guarded. Not hacked around on purpose.
 
+pub mod composer;
 pub mod modal;
 pub mod sidebar;
 pub mod topbar;
 
+use iced::widget::text_editor;
 use iced::{keyboard, Element, Subscription, Task};
-use rest_harness::app::{AppState, Effect, LoadedWorkspace, Message, WorkspaceMsg};
+use rest_harness::app::composer::{BodyEdit, BodyMotion};
+use rest_harness::app::{
+    AppState, ComposerMsg, Effect, LoadedWorkspace, Message, TabMsg, WorkspaceMsg,
+};
 use rest_harness::config::AppConfig;
 use rest_harness::domain::{Folder, HttpMethod, RequestEntry, Workspace};
+use rest_harness::history::HistoryStore;
+use rest_harness::http::{HttpClient as _, ReqwestHttpClient};
 use rest_harness::storage::{read_request, FsWorkspaceStorage, WorkspaceStorage};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
-/// The iced program state: the app core plus persisted config.
+/// The iced program state: the app core plus persisted config, the HTTP
+/// client, the in-flight cancellation registry and the per-tab editor
+/// contents (all shell-owned; the core stays `iced`-free).
 pub struct App {
     /// UI-agnostic application state (reducer-owned).
     pub state: AppState,
     /// Persisted app config (last workspace path bookkeeping).
     config: AppConfig,
+    /// HTTP client executing composer sends.
+    http_client: ReqwestHttpClient,
+    /// Cancellation tokens of in-flight sends, keyed by tab id.
+    cancels: HashMap<u64, CancellationToken>,
+    /// Body editor content per tab id (iced-side source of cursor state).
+    editors: HashMap<u64, text_editor::Content>,
 }
 
 impl App {
     fn new(state: AppState, config: AppConfig) -> Self {
-        App { state, config }
+        App {
+            state,
+            config,
+            http_client: ReqwestHttpClient::default(),
+            cancels: HashMap::new(),
+            editors: HashMap::new(),
+        }
     }
 }
 
@@ -67,23 +95,122 @@ pub fn boot() -> (App, Task<Message>) {
     (App::new(state, config), load_task(root))
 }
 
-/// Shell update: run the reducer, then execute every returned effect.
+/// Shell update: intercept shell-owned editor interactions, run the
+/// reducer, then execute every returned effect and keep the editor
+/// contents in sync with the reducer's body text.
 pub fn update(app: &mut App, message: Message) -> Task<Message> {
+    let message = match message {
+        // The shell owns the editor contents: perform the (mirrored)
+        // action locally, then hand the resulting text to the core.
+        Message::Composer(ComposerMsg::BodyEdit(edit)) => {
+            let text = perform_body_edit(app, edit);
+            Message::Composer(ComposerMsg::BodyTextChanged(text))
+        }
+        other => other,
+    };
+
+    // A send that finished (or was cancelled) no longer needs its token.
+    match &message {
+        Message::Composer(ComposerMsg::SendFinished { tab_id, .. })
+        | Message::Composer(ComposerMsg::SendCancelled { tab_id }) => {
+            app.cancels.remove(tab_id);
+        }
+        _ => {}
+    }
+
     let effects = app.state.update(message);
     let tasks: Vec<Task<Message>> = effects
         .into_iter()
         .map(|effect| execute_effect(app, effect))
         .collect();
+    sync_editors(app);
     Task::batch(tasks)
 }
 
-/// Top-level view: workspace bar, sidebar + placeholder pane, status strip,
+/// Perform a mirrored editor action on the active tab's editor content,
+/// returning the resulting text.
+fn perform_body_edit(app: &mut App, edit: BodyEdit) -> String {
+    let Some(id) = app.state.active_tab else {
+        return String::new();
+    };
+    let Some(content) = app.editors.get_mut(&id) else {
+        return String::new();
+    };
+    if let Some(action) = editor_action(edit) {
+        content.perform(action);
+    }
+    content.text()
+}
+
+/// Reconstruct the iced action from the core-owned mirror.
+fn editor_action(edit: BodyEdit) -> Option<text_editor::Action> {
+    use iced::widget::text_editor::{Action, Edit};
+    match edit {
+        BodyEdit::Insert(character) => Some(Action::Edit(Edit::Insert(character))),
+        BodyEdit::Paste(text) => Some(Action::Edit(Edit::Paste(Arc::new(text)))),
+        BodyEdit::Enter => Some(Action::Edit(Edit::Enter)),
+        BodyEdit::Indent => Some(Action::Edit(Edit::Indent)),
+        BodyEdit::Unindent => Some(Action::Edit(Edit::Unindent)),
+        BodyEdit::Backspace => Some(Action::Edit(Edit::Backspace)),
+        BodyEdit::Delete => Some(Action::Edit(Edit::Delete)),
+        BodyEdit::Move(motion) => Some(Action::Move(motion_of(motion))),
+        BodyEdit::Select(motion) => Some(Action::Select(motion_of(motion))),
+        BodyEdit::SelectWord => Some(Action::SelectWord),
+        BodyEdit::SelectLine => Some(Action::SelectLine),
+        BodyEdit::SelectAll => Some(Action::SelectAll),
+        BodyEdit::Click { x, y } => Some(Action::Click(iced::Point::new(x, y))),
+        BodyEdit::Drag { x, y } => Some(Action::Drag(iced::Point::new(x, y))),
+        BodyEdit::Scroll { lines } => Some(Action::Scroll { lines }),
+    }
+}
+
+/// Map the core motion mirror onto the iced motion.
+fn motion_of(motion: BodyMotion) -> text_editor::Motion {
+    use text_editor::Motion;
+    match motion {
+        BodyMotion::Left => Motion::Left,
+        BodyMotion::Right => Motion::Right,
+        BodyMotion::Up => Motion::Up,
+        BodyMotion::Down => Motion::Down,
+        BodyMotion::WordLeft => Motion::WordLeft,
+        BodyMotion::WordRight => Motion::WordRight,
+        BodyMotion::Home => Motion::Home,
+        BodyMotion::End => Motion::End,
+        BodyMotion::PageUp => Motion::PageUp,
+        BodyMotion::PageDown => Motion::PageDown,
+        BodyMotion::DocumentStart => Motion::DocumentStart,
+        BodyMotion::DocumentEnd => Motion::DocumentEnd,
+    }
+}
+
+/// Keep one editor content per tab, recreated when the reducer's body text
+/// diverges (mode switches, new tabs). Called after every message.
+fn sync_editors(app: &mut App) {
+    let ids: Vec<u64> = app.state.tabs.iter().map(|tab| tab.id).collect();
+    app.editors.retain(|id, _| ids.contains(id));
+    for tab in &app.state.tabs {
+        let expected = tab.body_text();
+        match app.editors.get_mut(&tab.id) {
+            Some(content) => {
+                if content.text() != expected {
+                    *content = text_editor::Content::with_text(&expected);
+                }
+            }
+            None => {
+                app.editors
+                    .insert(tab.id, text_editor::Content::with_text(&expected));
+            }
+        }
+    }
+}
+
+/// Top-level view: workspace bar, sidebar + composer pane, status strip,
 /// with the modal overlay stacked on top.
 pub fn view(app: &App) -> Element<'_, Message> {
     let state = &app.state;
     let base = iced::widget::column![
         topbar::view(state),
-        iced::widget::row![sidebar::view(state), right_pane(state)].height(iced::Fill),
+        iced::widget::row![sidebar::view(state), composer::view(app)].height(iced::Fill),
         status_strip(state),
     ]
     .width(iced::Fill)
@@ -98,10 +225,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
     }
 }
 
-/// Keyboard subscriptions: `Ctrl+R` reloads the workspace; `Esc` cancels a
-/// modal (a no-op in the reducer when none is open, so the closure stays
-/// non-capturing as iced requires). `keyboard::listen` only receives events
-/// the widgets ignore, so focused text inputs still let both through.
+/// Keyboard subscriptions: `Ctrl+R` reloads the workspace, `Ctrl+S` saves
+/// the active tab; `Esc` cancels a modal (a no-op in the reducer when none
+/// is open, so the closure stays non-capturing as iced requires).
+/// `keyboard::listen` only receives events the widgets ignore, so focused
+/// text inputs still let both through.
 pub fn subscription(_app: &App) -> Subscription<Message> {
     keyboard::listen().filter_map(|event| match event {
         keyboard::Event::KeyPressed {
@@ -110,6 +238,13 @@ pub fn subscription(_app: &App) -> Subscription<Message> {
             ..
         } if modifiers.control() && physical_key == keyboard::key::Code::KeyR => {
             Some(Message::Workspace(WorkspaceMsg::Reload))
+        }
+        keyboard::Event::KeyPressed {
+            modifiers,
+            physical_key,
+            ..
+        } if modifiers.control() && physical_key == keyboard::key::Code::KeyS => {
+            Some(Message::Composer(ComposerMsg::Save))
         }
         keyboard::Event::KeyPressed {
             key: keyboard::Key::Named(keyboard::key::Named::Escape),
@@ -193,6 +328,115 @@ fn execute_effect(app: &mut App, effect: Effect) -> Task<Message> {
                 let storage = FsWorkspaceStorage;
                 delete_node(&storage, &path, root.as_deref())?;
                 load_from_disk(&root.unwrap_or_else(|| parent_of(&path)))
+            })
+        }
+        Effect::OpenRequest { path } => {
+            // Read the request file off-thread; the reply carries the path
+            // and the parsed request (or the error text).
+            let task_path = path.clone();
+            Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || read_request(&task_path))
+                        .await
+                        .map_err(|error| format!("Read failed: {error}"))
+                        .and_then(|result| result.map_err(|error| error.to_string()))
+                },
+                move |request| {
+                    Message::Tab(TabMsg::Opened {
+                        path: path.clone(),
+                        request,
+                    })
+                },
+            )
+        }
+        Effect::SendRequest { tab_id, prepared } => {
+            let token = CancellationToken::new();
+            app.cancels.insert(tab_id, token.clone());
+            let client = app.http_client.clone();
+            Task::perform(
+                async move {
+                    tokio::select! {
+                        result = client.execute(&prepared) => match result {
+                            Ok(data) => Message::Composer(ComposerMsg::SendFinished {
+                                tab_id,
+                                result: Ok(data),
+                            }),
+                            Err(error) => Message::Composer(ComposerMsg::SendFinished {
+                                tab_id,
+                                result: Err(error.to_string()),
+                            }),
+                        },
+                        _ = token.cancelled() => {
+                            Message::Composer(ComposerMsg::SendCancelled { tab_id })
+                        }
+                    }
+                },
+                |message| message,
+            )
+        }
+        Effect::CancelSend { tab_id } => {
+            if let Some(token) = app.cancels.remove(&tab_id) {
+                token.cancel();
+            }
+            // The select! arm delivers `SendCancelled`.
+            Task::none()
+        }
+        Effect::SaveRequest { path, request } => {
+            let root = app
+                .state
+                .workspace_root
+                .clone()
+                .unwrap_or_else(|| parent_of(&path));
+            storage_task(move || {
+                let storage = FsWorkspaceStorage;
+                let parent = parent_of(&path);
+                storage.save_request(&parent, &request)?;
+                load_from_disk(&root)
+            })
+        }
+        Effect::SaveDraft { parent, request } => {
+            let root = app.state.workspace_root.clone();
+            storage_task(move || {
+                let storage = FsWorkspaceStorage;
+                // Must NOT overwrite: `create_request` fails if the file
+                // already exists.
+                storage.create_request(&parent, &request)?;
+                load_from_disk(&root.unwrap_or_else(|| parent_of(&parent)))
+            })
+        }
+        Effect::AppendHistory {
+            entry,
+            secret_values,
+        } => match app.state.workspace_root.clone() {
+            Some(root) => storage_task(move || {
+                // Redaction happens here, on write, against the tab's
+                // secret values.
+                HistoryStore::new(&root).append_entry(entry, &secret_values)?;
+                load_from_disk(&root)
+            }),
+            None => no_workspace_task(),
+        },
+        Effect::CopyText(text) => iced::clipboard::write(text),
+        Effect::SaveEnvironment {
+            collection_dir,
+            environment,
+        } => {
+            let root = app.state.workspace_root.clone();
+            storage_task(move || {
+                let storage = FsWorkspaceStorage;
+                storage.save_environment(&collection_dir, &environment)?;
+                load_from_disk(&root.unwrap_or_else(|| parent_of(&collection_dir)))
+            })
+        }
+        Effect::SaveSecrets {
+            collection_dir,
+            secrets,
+        } => {
+            let root = app.state.workspace_root.clone();
+            storage_task(move || {
+                let storage = FsWorkspaceStorage;
+                storage.save_secrets(&collection_dir, &secrets)?;
+                load_from_disk(&root.unwrap_or_else(|| parent_of(&collection_dir)))
             })
         }
         Effect::Notify(text) => {
@@ -309,19 +553,6 @@ fn record_method(entry: &RequestEntry, methods: &mut BTreeMap<PathBuf, HttpMetho
     }
 }
 
-/// Uppercase label of an HTTP method (for badges and notices).
-pub fn method_label(method: HttpMethod) -> &'static str {
-    match method {
-        HttpMethod::Get => "GET",
-        HttpMethod::Post => "POST",
-        HttpMethod::Put => "PUT",
-        HttpMethod::Patch => "PATCH",
-        HttpMethod::Delete => "DELETE",
-        HttpMethod::Head => "HEAD",
-        HttpMethod::Options => "OPTIONS",
-    }
-}
-
 /// The bottom status strip: the reducer's last error/info line.
 fn status_strip(state: &AppState) -> Element<'_, Message> {
     use iced::widget::{container, text};
@@ -336,56 +567,4 @@ fn status_strip(state: &AppState) -> Element<'_, Message> {
             ..container::Style::default()
         })
         .into()
-}
-
-/// The right pane placeholder for the Request composer (next increment).
-/// Shows a one-line notice naming the last activated request / selected
-/// history entry so activation is visibly wired.
-fn right_pane(state: &AppState) -> Element<'_, Message> {
-    use iced::widget::{column, container, text};
-    use iced::Theme;
-
-    let mut pane = column![].spacing(4);
-    if let Some(path) = &state.last_opened {
-        let name = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("unknown");
-        pane = pane.push(
-            text(format!("Opened request: {name}"))
-                .size(12)
-                .style(text::secondary),
-        );
-    } else if let Some(index) = state.history_selected {
-        if let Some(entry) = state.workspace.as_ref().and_then(|w| w.history.get(index)) {
-            pane = pane.push(
-                text(format!(
-                    "Selected history: {} {}",
-                    method_label(entry.request.method),
-                    entry.request.url
-                ))
-                .size(12)
-                .style(text::secondary),
-            );
-        }
-    }
-
-    pane = pane.push(
-        container(
-            container(
-                text("Request composer — coming in the next increment").style(text::secondary),
-            )
-            .center(iced::Fill),
-        )
-        .width(iced::Fill)
-        .height(iced::Fill)
-        .style(|theme: &Theme| container::Style {
-            border: iced::border::rounded(4)
-                .width(1)
-                .color(theme.extended_palette().secondary.weak.color),
-            ..container::Style::default()
-        }),
-    );
-
-    pane.width(iced::Fill).height(iced::Fill).padding(8).into()
 }
