@@ -24,10 +24,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install Linux GUI dependencies
+      - name: Install GPUI Linux dev dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev libx11-dev
+          sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev libwayland-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libexpat1-dev
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -67,11 +67,11 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install Linux GUI dependencies
+      - name: Install GPUI Linux dev dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev libx11-dev
+          sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev libwayland-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libexpat1-dev
 
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
