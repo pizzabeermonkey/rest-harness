@@ -1,0 +1,17 @@
+name: Get headers
+method: get
+url: "{{base_url}}/headers"
+params:
+  - key: verbose
+    value: "1"
+    description: Demo query parameter
+    enabled: true
+  - key: trace
+    value: "on"
+    description: Disabled row — kept in the file, excluded from the URL
+    enabled: false
+headers:
+  - key: Accept
+    value: application/json
+    description: ""
+    enabled: true
