@@ -48,7 +48,7 @@ pub fn view(state: &AppState) -> Element<'_, Message> {
             name,
             ..
         } => save_draft_card(collections, *target, folder.clone(), name.clone()),
-        Modal::CloseDirty { tab_id } => close_dirty_card(state, *tab_id),
+        Modal::CloseDirty { tab_id: _ } => close_dirty_card(),
         Modal::EditEnvironments {
             envs,
             selected,
@@ -186,36 +186,24 @@ fn save_draft_card(
     .into()
 }
 
-/// Card for closing a dirty tab: Save / Discard / Cancel. The Save action
-/// is hidden for HistoryDraft tabs (they never save).
-fn close_dirty_card(state: &AppState, tab_id: u64) -> Element<'static, Message> {
-    let readonly = state
-        .tabs
-        .iter()
-        .find(|tab| tab.id == tab_id)
-        .is_some_and(|tab| tab.is_readonly());
-
-    let mut buttons = row![].spacing(8);
-    if !readonly {
-        buttons = buttons.push(
-            button(text("Save").size(12))
-                .on_press(Message::Modal(ModalMsg::Confirm))
-                .style(button::primary)
-                .padding(6),
-        );
-    }
-    buttons = buttons.push(
+/// Card for closing a dirty tab: Save / Discard / Cancel (Save routes to
+/// the save-draft modal for Draft and HistoryDraft tabs).
+fn close_dirty_card() -> Element<'static, Message> {
+    let buttons = row![
+        button(text("Save").size(12))
+            .on_press(Message::Modal(ModalMsg::Confirm))
+            .style(button::primary)
+            .padding(6),
         button(text("Discard").size(12))
             .on_press(Message::Modal(ModalMsg::Discard))
             .style(button::secondary)
             .padding(6),
-    );
-    buttons = buttons.push(
         button(text("Cancel").size(12))
             .on_press(Message::Modal(ModalMsg::Cancel))
             .style(button::secondary)
             .padding(6),
-    );
+    ]
+    .spacing(8);
 
     column![
         text("Unsaved changes").size(14),

@@ -834,9 +834,8 @@ impl AppState {
     /// The CloseDirty modal's Save action:
     /// - Saved tab: emit `Effect::SaveRequest`, arm `pending_close` so the
     ///   tab closes on the success reload.
-    /// - Draft tab: route to the save-draft modal (`pending_close` stays
-    ///   armed, so the tab closes after promotion).
-    /// - HistoryDraft: never saves — a no-op (the card hides the button).
+    /// - Draft and HistoryDraft tabs: route to the save-draft modal
+    ///   (`pending_close` stays armed, so the tab closes after promotion).
     fn confirm_close_dirty(&mut self, tab_id: u64) -> Vec<Effect> {
         let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
             self.modal = None;
@@ -852,7 +851,7 @@ impl AppState {
                     request: tab.request.clone(),
                 }]
             }
-            TabKind::Draft => {
+            TabKind::Draft | TabKind::HistoryDraft => {
                 // Route to the save-draft modal; `pending_close` is armed
                 // now so the tab closes on the reload following a
                 // successful promotion (cancelling the modal disarms it).
@@ -860,7 +859,6 @@ impl AppState {
                 self.open_save_draft_modal(tab_id);
                 Vec::new()
             }
-            TabKind::HistoryDraft => Vec::new(),
         }
     }
 

@@ -191,10 +191,15 @@ fn tree_row(state: &AppState, node: &SidebarNode) -> Element<'static, Message> {
         "✎",
         Message::Crud(CrudMsg::Rename(node.path.clone())),
     ));
-    actions = actions.push(action_button(
-        "⧉",
-        Message::Crud(CrudMsg::Duplicate(node.path.clone())),
-    ));
+    // User Story 9: no Duplicate on a Collection (duplicating a Collection
+    // directory and its `.secrets.yaml` is not offered in v1). Rename and
+    // Delete stay available everywhere.
+    if matches!(node.kind, NodeKind::Folder | NodeKind::Request) {
+        actions = actions.push(action_button(
+            "⧉",
+            Message::Crud(CrudMsg::Duplicate(node.path.clone())),
+        ));
+    }
     actions = actions.push(action_button(
         "✕",
         Message::Crud(CrudMsg::Delete(node.path.clone())),

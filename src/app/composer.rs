@@ -7,9 +7,10 @@
 //!
 //! Overview:
 //! - A [`Tab`] is one open editor: a saved Request file
-//!   ([`TabKind::Saved`]), an unsaved [`TabKind::Draft`] or a read-only-ish
-//!   [`TabKind::HistoryDraft`] opened from a History Entry (never saves,
-//!   prefilled with the entry's response snapshot).
+//!   ([`TabKind::Saved`]), an unsaved [`TabKind::Draft`] or a
+//!   [`TabKind::HistoryDraft`] opened from a History Entry (a detached
+//!   draft that saves via the save-draft modal and is then promoted to
+//!   `Saved`, prefilled with the entry's response snapshot).
 //! - Every composer edit marks the tab [`Tab::dirty`]; closing a dirty tab
 //!   opens a Save/Discard/Cancel modal (`Modal::CloseDirty`).
 //! - The URL and the params table stay in sync bidirectionally via
@@ -68,8 +69,9 @@ pub enum TabKind {
     /// An unsaved new request; promoted to `Saved` through the save-draft
     /// modal.
     Draft,
-    /// Opened from a History Entry; carries the entry's response snapshot
-    /// and never saves.
+    /// Opened from a History Entry; a detached draft that saves via the
+    /// save-draft modal (never overwrites) and carries the entry's
+    /// response snapshot.
     HistoryDraft,
 }
 
@@ -138,6 +140,10 @@ pub struct ResponseState {
     pub view: ResponseView,
 }
 
+/// Appended to both body views of a History response whose body was
+/// truncated to fit the 1 MB History limit.
+const TRUNCATION_NOTICE: &str = "\n\n[Truncated at 1 MB in history]";
+
 impl ResponseState {
     /// Build the viewer state from an HTTP response.
     pub fn from_http(data: &HttpResponseData) -> Self {
@@ -154,15 +160,24 @@ impl ResponseState {
     }
 
     /// Build the viewer state from a History Entry's response snapshot.
+    ///
+    /// When the entry's body was truncated to fit the 1 MB History limit,
+    /// a notice is appended to both body views so the user sees why the
+    /// payload ended early.
     pub fn from_history(response: &HistoryResponse) -> Self {
+        let notice = if response.body_truncated {
+            TRUNCATION_NOTICE
+        } else {
+            ""
+        };
         ResponseState {
             status_code: response.status_code,
             reason_phrase: response.reason_phrase.clone(),
             elapsed_ms: response.elapsed_ms,
             size_bytes: response.size_bytes,
             headers: response.headers.clone(),
-            body_pretty: pretty_json(&response.body),
-            body_raw: response.body.clone(),
+            body_pretty: format!("{}{notice}", pretty_json(&response.body)),
+            body_raw: format!("{}{notice}", response.body),
             view: ResponseView::Headers,
         }
     }
@@ -378,8 +393,8 @@ pub enum ComposerMsg {
         /// The sending tab.
         tab_id: u64,
     },
-    /// Save the active tab (Saved: upsert; Draft: open the save-draft
-    /// modal; HistoryDraft: never saves).
+    /// Save the active tab (Saved: upsert; Draft and HistoryDraft: open
+    /// the save-draft modal).
     Save,
     /// Copy the response body (per the active view) to the clipboard.
     CopyBody,
@@ -731,6 +746,16 @@ impl AppState {
             self.active_tab = Some(self.tabs[existing].id);
             return;
         }
+        // Reconcile URL ↔ params from disk truth: a request saved with a
+        // query in the URL but an empty table gets its params table
+        // populated; one with enabled rows and a stale URL gets its URL
+        // rebuilt (see `crate::url_query`).
+        let mut request = request;
+        if request.params.is_empty() && request.url.contains('?') {
+            request.params = url_query::sync_url_to_params(&request.url, &[]);
+        } else if request.params.iter().any(|row| row.enabled) {
+            request.url = url_query::sync_params_to_url(&request.url, &request.params);
+        }
         let id = self.next_tab_id();
         let env = self
             .workspace
@@ -955,8 +980,10 @@ impl AppState {
     }
 
     /// Save the active tab: Saved tabs upsert via `Effect::SaveRequest`
-    /// (dirty cleared on the following successful reload), Drafts open the
-    /// save-draft modal, HistoryDrafts never save.
+    /// (dirty cleared on the following successful reload); Drafts and
+    /// HistoryDrafts open the save-draft modal (a HistoryDraft is a
+    /// detached draft: `create_request` never overwrites, and the tab is
+    /// promoted to `Saved` on the success reload).
     fn save_active(&mut self) -> Vec<Effect> {
         let Some(tab) = self.active_tab().cloned() else {
             return Vec::new();
@@ -969,12 +996,8 @@ impl AppState {
                     request: tab.request.clone(),
                 }]
             }
-            TabKind::Draft => {
+            TabKind::Draft | TabKind::HistoryDraft => {
                 self.open_save_draft_modal(tab.id);
-                Vec::new()
-            }
-            TabKind::HistoryDraft => {
-                self.status = Some("History drafts cannot be saved.".to_string());
                 Vec::new()
             }
         }
@@ -1310,13 +1333,6 @@ impl AppState {
 
 use crate::app::AppState;
 
-impl Tab {
-    /// Whether the tab never saves (HistoryDraft).
-    pub fn is_readonly(&self) -> bool {
-        matches!(self.kind, TabKind::HistoryDraft)
-    }
-}
-
 /// Human-readable byte size: `B` up to 1 KiB, then `KB`, then `MB`.
 pub fn human_size(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
@@ -1383,7 +1399,9 @@ fn request_from_history(redacted: &RedactedHttpRequest) -> Request {
         name: String::new(),
         method: redacted.method,
         url: redacted.url.clone(),
-        params: Vec::new(),
+        // The entry URL's query pairs prefill the Params table (enabled),
+        // matching the URL↔params sync of the other tab kinds.
+        params: url_query::sync_url_to_params(&redacted.url, &[]),
         headers: redacted
             .headers
             .iter()
@@ -1693,5 +1711,31 @@ mod tests {
         assert_eq!(ResponseState::status_class(404), StatusClass::ClientError);
         assert_eq!(ResponseState::status_class(500), StatusClass::ServerError);
         assert_eq!(ResponseState::status_class(100), StatusClass::Other);
+    }
+
+    #[test]
+    fn from_history_appends_the_truncation_notice() {
+        let response = HistoryResponse {
+            status_code: 200,
+            reason_phrase: "OK".into(),
+            elapsed_ms: 5,
+            size_bytes: 2_000_000,
+            headers: Vec::new(),
+            body: "{\"a\":1}".into(),
+            body_truncated: true,
+            timestamp: chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
+        };
+        let state = ResponseState::from_history(&response);
+        assert!(state.body_raw.ends_with("[Truncated at 1 MB in history]"));
+        assert!(state
+            .body_pretty
+            .ends_with("[Truncated at 1 MB in history]"));
+
+        // Non-truncated responses keep the current behaviour exactly.
+        let mut plain = response.clone();
+        plain.body_truncated = false;
+        let state = ResponseState::from_history(&plain);
+        assert_eq!(state.body_raw, "{\"a\":1}");
+        assert_eq!(state.body_pretty, "{\n  \"a\": 1\n}");
     }
 }

@@ -126,8 +126,15 @@ impl HttpClient for ReqwestHttpClient {
             .map_err(|e| Error::Other(e.to_string()))?;
         let elapsed_ms = started.elapsed().as_millis() as u64;
 
-        let body_raw = String::from_utf8_lossy(&bytes).into_owned();
-        // v1 pretty-prints JSON only; XML/HTML bodies are shown raw.
+        // Non-UTF-8 bodies become a readable binary summary (byte count
+        // plus a hex dump of the leading bytes) instead of a lossy mess of
+        // replacement characters.
+        let body_raw = match std::str::from_utf8(&bytes) {
+            Ok(text) => text.to_string(),
+            Err(_) => binary_summary(&bytes),
+        };
+        // v1 pretty-prints JSON only; XML/HTML bodies are shown raw (and
+        // the binary summary is not JSON, so it is shown raw as well).
         let body_pretty = if serde_json::from_str::<serde_json::Value>(&body_raw).is_ok() {
             crate::domain::pretty_json(&body_raw)
         } else {
@@ -144,6 +151,36 @@ impl HttpClient for ReqwestHttpClient {
             body_pretty,
         })
     }
+}
+
+/// How many bytes of a non-UTF-8 body [`binary_summary`] hex-dumps.
+const BINARY_PREVIEW_LIMIT: usize = 256;
+
+/// Bytes per hex-dump line of [`binary_summary`].
+const BINARY_PREVIEW_BYTES_PER_LINE: usize = 16;
+
+/// Readable summary for a non-UTF-8 response body (User Story 29): the
+/// byte count plus a hex dump (`offset  hex bytes`, 16 bytes per line) of
+/// up to the first [`BINARY_PREVIEW_LIMIT`] bytes.
+///
+/// Both `body_raw` and `body_pretty` of the response are set to this
+/// summary (it never parses as JSON, so pretty == raw).
+fn binary_summary(bytes: &[u8]) -> String {
+    let preview = &bytes[..bytes.len().min(BINARY_PREVIEW_LIMIT)];
+    let lines = preview
+        .chunks(BINARY_PREVIEW_BYTES_PER_LINE)
+        .enumerate()
+        .map(|(line, chunk)| {
+            let hex = chunk
+                .iter()
+                .map(|byte| format!("{byte:02X}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("{:04X}  {}", line * BINARY_PREVIEW_BYTES_PER_LINE, hex)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("[Binary response: {} bytes]\n{}", bytes.len(), lines)
 }
 
 /// Map a domain [`HttpMethod`] onto `reqwest::Method`.
@@ -262,6 +299,17 @@ mod tests {
             Error::Other(message) => assert!(message.contains("bad header"), "{message}"),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn binary_summary_caps_the_hex_preview_at_256_bytes() {
+        let bytes: Vec<u8> = (0..1000).map(|i| (i % 251) as u8).collect();
+        let summary = binary_summary(&bytes);
+        assert!(summary.starts_with("[Binary response: 1000 bytes]\n"));
+        let lines: Vec<&str> = summary.lines().skip(1).collect();
+        assert_eq!(lines.len(), 16, "256 bytes hex-dumped at 16 per line");
+        assert!(lines[0].starts_with("0000  "));
+        assert!(lines[15].starts_with("00F0  "));
     }
 
     #[test]

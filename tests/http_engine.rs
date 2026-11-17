@@ -22,6 +22,12 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// request (headers plus a content-length body when one is declared), writes
 /// `response` verbatim, and resolves to the raw request text it received.
 async fn serve_once(response: String) -> (SocketAddr, JoinHandle<String>) {
+    serve_once_bytes(response.into_bytes()).await
+}
+
+/// Byte-oriented variant of [`serve_once`] for responses whose body is not
+/// valid UTF-8.
+async fn serve_once_bytes(response: Vec<u8>) -> (SocketAddr, JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
@@ -54,7 +60,7 @@ async fn serve_once(response: String) -> (SocketAddr, JoinHandle<String>) {
         }
 
         let request_text = String::from_utf8_lossy(&received).into_owned();
-        socket.write_all(response.as_bytes()).await.unwrap();
+        socket.write_all(&response).await.unwrap();
         socket.shutdown().await.unwrap();
         request_text
     });
@@ -175,6 +181,36 @@ async fn schemeless_prepared_urls_work_end_to_end() {
     assert_eq!(data.size_bytes, 0);
     assert_eq!(data.body_raw, "");
     assert!(request_text.starts_with("GET /ping HTTP/1.1\r\n"));
+}
+
+#[tokio::test]
+async fn non_utf8_bodies_become_a_readable_binary_summary() {
+    // Repeated `[0xFF, 0xFE, 0x00, 0x01]` — invalid UTF-8, contains NULs.
+    let body: Vec<u8> = [0xFF, 0xFE, 0x00, 0x01]
+        .into_iter()
+        .cycle()
+        .take(32)
+        .collect();
+    let mut response =
+        format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n", body.len()).into_bytes();
+    response.extend_from_slice(&body);
+    let (addr, server) = serve_once_bytes(response).await;
+
+    let prepared = prepared_get(format!("http://{addr}/binary"), Vec::new());
+    let client = ReqwestHttpClient::new(Duration::from_secs(5)).unwrap();
+    let data = client.execute(&prepared).await.unwrap();
+    server.await.unwrap();
+
+    assert_eq!(data.size_bytes, 32);
+    assert!(
+        data.body_raw.starts_with("[Binary response: 32 bytes]\n"),
+        "binary summary expected: {:?}",
+        data.body_raw
+    );
+    // The hex dump contains the payload bytes.
+    assert!(data.body_raw.contains("FF FE 00 01"), "{:?}", data.body_raw);
+    // Not JSON, so pretty == raw.
+    assert_eq!(data.body_pretty, data.body_raw);
 }
 
 #[tokio::test]

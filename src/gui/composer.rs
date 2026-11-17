@@ -278,8 +278,12 @@ fn editor_area<'a>(app: &'a App, tab: &'a Tab) -> iced::widget::Column<'a, Messa
 
     let switcher = row![
         subtab_button("Params".to_string(), SubTab::Params),
+        // User Story 21: the badge counts enabled header rows only.
         subtab_button(
-            format!("Headers ({})", tab.request.headers.len()),
+            format!(
+                "Headers ({})",
+                tab.request.headers.iter().filter(|h| h.enabled).count()
+            ),
             SubTab::Headers,
         ),
         subtab_button("Body".to_string(), SubTab::Body),
