@@ -11,6 +11,8 @@ use iced::widget::{button, column, container, pick_list, row, scrollable, text, 
 use iced::{Color, Element, Theme};
 use rest_harness::app::{AppState, Message, Modal, ModalMsg, ModalSlot, NameValue, NodeKind};
 
+use super::style;
+
 /// Render the modal overlay (dimmed backdrop + centered card).
 pub fn view(state: &AppState) -> Element<'_, Message> {
     let Some(modal) = &state.modal else {
@@ -118,7 +120,7 @@ fn delete_card(kind: NodeKind, name: String) -> Element<'static, Message> {
         row![
             button(text("Cancel").size(12))
                 .on_press(Message::Modal(ModalMsg::Cancel))
-                .style(button::secondary)
+                .style(style::secondary)
                 .padding(6),
             button(text("Delete").size(12))
                 .on_press(Message::Modal(ModalMsg::Confirm))
@@ -173,7 +175,7 @@ fn save_draft_card(
         row![
             button(text("Cancel").size(12))
                 .on_press(Message::Modal(ModalMsg::Cancel))
-                .style(button::secondary)
+                .style(style::secondary)
                 .padding(6),
             button(text("Save").size(12))
                 .on_press(Message::Modal(ModalMsg::Confirm))
@@ -196,11 +198,11 @@ fn close_dirty_card() -> Element<'static, Message> {
             .padding(6),
         button(text("Discard").size(12))
             .on_press(Message::Modal(ModalMsg::Discard))
-            .style(button::secondary)
+            .style(style::secondary)
             .padding(6),
         button(text("Cancel").size(12))
             .on_press(Message::Modal(ModalMsg::Cancel))
-            .style(button::secondary)
+            .style(style::secondary)
             .padding(6),
     ]
     .spacing(8);
@@ -255,7 +257,7 @@ fn environments_card(
         .push(row![
             button(text("Cancel").size(12))
                 .on_press(Message::Modal(ModalMsg::Cancel))
-                .style(button::secondary)
+                .style(style::secondary)
                 .padding(6),
             button(text("Save").size(12))
                 .on_press(Message::Modal(ModalMsg::Confirm))
@@ -306,7 +308,7 @@ fn secrets_card(
     card = card.push(row![
         button(text("Cancel").size(12))
             .on_press(Message::Modal(ModalMsg::Cancel))
-            .style(button::secondary)
+            .style(style::secondary)
             .padding(6),
         button(text("Save").size(12))
             .on_press(Message::Modal(ModalMsg::Confirm))
@@ -341,7 +343,7 @@ fn name_value_rows(
                     .padding(4)
                     .size(12)
                     .width(iced::Length::FillPortion(2)),
-                button(text("✕").size(10))
+                button(text("×").size(10))
                     .on_press(Message::Modal(ModalMsg::RowRemoved(slot, index)))
                     .style(button::text)
                     .padding(2),
@@ -352,7 +354,7 @@ fn name_value_rows(
     list = list.push(
         button(text(format!("+ {add_label}")).size(11))
             .on_press(Message::Modal(ModalMsg::RowAdded(slot)))
-            .style(button::secondary)
+            .style(style::secondary)
             .padding(4),
     );
     scrollable(list).height(iced::Length::FillPortion(3)).into()
@@ -372,7 +374,7 @@ fn cancel_confirm_row() -> iced::widget::Row<'static, Message> {
     row![
         button(text("Cancel").size(12))
             .on_press(Message::Modal(ModalMsg::Cancel))
-            .style(button::secondary)
+            .style(style::secondary)
             .padding(6),
         button(text("Confirm").size(12))
             .on_press(Message::Modal(ModalMsg::Confirm))

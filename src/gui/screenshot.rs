@@ -338,7 +338,7 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> std::io::Result<()> {
 /// Render `gui::view(app)` offscreen with the tiny-skia renderer and write
 /// an 8-bit RGBA PNG to `output`.
 fn render(app: &super::App, output: &Path) -> Result<(), String> {
-    let mut renderer = iced::Renderer::new(iced::Font::default(), iced::Pixels(16.0));
+    let mut renderer = iced::Renderer::new(iced::Font::with_name("Fira Sans"), iced::Pixels(16.0));
     let element = super::view(app);
     let mut ui = UserInterface::build(element, SIZE, Cache::new(), &mut renderer);
 
