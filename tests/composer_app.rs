@@ -1,11 +1,11 @@
 //! Reducer + shell-equivalent tests for the Request Composer increment.
 //!
-//! These drive [`AppState::update`] exactly like the iced shell would,
+//! These drive [`AppState::update`] exactly like the gpui shell would,
 //! executing the returned [`Effect`]s against a real tempdir via
 //! [`FsWorkspaceStorage`] and feeding reload results back in through
 //! `Message::Workspace(WorkspaceMsg::Loaded(..))`. Network/clipboard
 //! effects (`SendRequest`/`CancelSend`/`CopyText`) are recorded, not
-//! executed — the send pipeline's transport lives in the iced shell.
+//! executed — the send pipeline's transport lives in the gpui shell.
 
 use rest_harness::app::composer::{BodyMode, SubTab};
 use rest_harness::app::{
@@ -21,7 +21,7 @@ use rest_harness::http::HttpResponseData;
 use rest_harness::storage::{FsWorkspaceStorage, WorkspaceStorage};
 use std::path::{Path, PathBuf};
 
-/// Executes effects like the iced shell would (pure reducer + real storage).
+/// Executes effects like the gpui shell would (pure reducer + real storage).
 struct Harness {
     state: AppState,
     root: PathBuf,
