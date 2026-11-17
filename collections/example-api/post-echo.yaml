@@ -1,0 +1,16 @@
+name: Post echo
+method: post
+url: "{{base_url}}/post"
+headers:
+  - key: Accept
+    value: application/json
+    description: ""
+    enabled: true
+auth: !bearer
+  token: "{{api_token}}"
+body: !raw
+  content_type: json
+  content: |
+    {
+      "message": "Hello from REST Harness"
+    }

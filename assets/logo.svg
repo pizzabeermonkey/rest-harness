@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 360 160" width="360" height="160" role="img" aria-labelledby="title">
+  <title id="title">REST Harness logo</title>
+
+  <!-- Badge background: self-contained dark slate, legible on dark and light themes -->
+  <rect x="4" y="4" width="352" height="152" rx="28" fill="#1e293b"/>
+  <rect x="4" y="4" width="352" height="152" rx="28" fill="none" stroke="#334155" stroke-width="2"/>
+
+  <!-- HTTP method chip -->
+  <rect x="106" y="48" width="64" height="30" rx="9" fill="#f97316"/>
+  <text x="138" y="69" text-anchor="middle" font-family="'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="17" font-weight="700" letter-spacing="1" fill="#ffffff">GET</text>
+
+  <!-- Code brackets: harness the request/response -->
+  <text x="216" y="70" text-anchor="middle" font-family="'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace" font-size="30" font-weight="600" fill="#38bdf8">&lt;/&gt;</text>
+
+  <!-- Wordmark -->
+  <text x="180" y="127" text-anchor="middle" font-family="'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="27" font-weight="800" letter-spacing="2.5"><tspan fill="#f8fafc">REST</tspan><tspan fill="#38bdf8" dx="10">HARNESS</tspan></text>
+</svg>
