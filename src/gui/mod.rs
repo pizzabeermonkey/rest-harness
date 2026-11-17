@@ -165,9 +165,13 @@ pub fn run() {
         });
         cx.bind_keys([
             KeyBinding::new("cmd-r", ReloadWorkspace, None),
+            KeyBinding::new("ctrl-r", ReloadWorkspace, None),
             KeyBinding::new("cmd-n", NewDraft, None),
+            KeyBinding::new("ctrl-n", NewDraft, None),
             KeyBinding::new("cmd-enter", SendActive, None),
+            KeyBinding::new("ctrl-enter", SendActive, None),
             KeyBinding::new("cmd-s", SaveActive, None),
+            KeyBinding::new("ctrl-s", SaveActive, None),
         ]);
 
         cx.activate(true);
@@ -633,7 +637,14 @@ impl HarnessApp {
             .gap_1();
 
         if let Some(workspace) = &self.state.workspace {
-            for (index, (label, path)) in collect_requests(workspace).into_iter().enumerate() {
+            let needle = self.state.filter.trim().to_ascii_lowercase();
+            for (index, (label, path)) in collect_requests(workspace)
+                .into_iter()
+                .filter(|(label, _)| {
+                    needle.is_empty() || label.to_ascii_lowercase().contains(&needle)
+                })
+                .enumerate()
+            {
                 let method = self
                     .state
                     .request_methods
