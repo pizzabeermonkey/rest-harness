@@ -42,6 +42,13 @@ pub enum Error {
     #[error("already exists: {}", .0.display())]
     AlreadyExists(PathBuf),
 
+    /// A `{{variable}}` placeholder has no value in the active Environment/Secrets.
+    #[error("missing variables: {variables:?}")]
+    MissingVariables {
+        /// Sorted, deduplicated names of every unresolved variable.
+        variables: Vec<String>,
+    },
+
     /// Anything else that does not fit a structured variant.
     #[error("{0}")]
     Other(String),

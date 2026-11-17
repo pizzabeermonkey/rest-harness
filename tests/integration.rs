@@ -4,10 +4,12 @@
 
 use rest_harness::config::{AppConfig, SAMPLE_COLLECTION_NAME, SAMPLE_REQUEST_NAME};
 use rest_harness::domain::{
-    ApiKeyLocation, AuthConfig, Environment, HistoryEntry, HistoryResponse, HttpMethod,
+    ApiKeyLocation, AuthConfig, Environment, HistoryEntry, HistoryResponse, HttpHeader, HttpMethod,
     KeyValueRow, RawContentType, RedactedHttpRequest, Request, RequestBody, SecretStore,
 };
 use rest_harness::history::{HistoryStore, MAX_HISTORY_ENTRIES, MAX_RESPONSE_BODY_BYTES};
+use rest_harness::http::{build_history_entry, HttpClient, HttpResponseData};
+use rest_harness::interpolation::{missing_variables, prepare, PreparedHttpRequest};
 use rest_harness::storage::{
     ensure_gitignore, sanitize_filename, FsWorkspaceStorage, WorkspaceStorage, ENVIRONMENTS_DIR,
     HISTORY_FILE, SECRETS_FILE,
@@ -769,4 +771,132 @@ fn gitignore_helper_appends_missing_entries_without_duplicates() {
     ensure_gitignore(dir2.path()).unwrap();
     let after = fs::read_to_string(dir2.path().join(".gitignore")).unwrap();
     assert_eq!(before, after, "fully covered .gitignore must be untouched");
+}
+
+// ---------------------------------------------------------------------------
+// Engine pipeline: Request on disk -> prepare -> fake HTTP -> redacted history
+// ---------------------------------------------------------------------------
+
+/// The part of a prepared request a fake client needs to report back.
+#[derive(Debug, Clone)]
+struct CapturedRequest {
+    url: String,
+    headers: Vec<HttpHeader>,
+}
+
+/// A closure-free fake [`HttpClient`] returning canned response data while
+/// capturing the request it was asked to execute.
+struct FakeHttpClient {
+    status_code: u16,
+    reason_phrase: String,
+    body: String,
+    captured: std::sync::Mutex<Option<CapturedRequest>>,
+}
+
+impl HttpClient for FakeHttpClient {
+    async fn execute(
+        &self,
+        request: &PreparedHttpRequest,
+    ) -> rest_harness::Result<HttpResponseData> {
+        *self.captured.lock().unwrap() = Some(CapturedRequest {
+            url: request.url.clone(),
+            headers: request.headers.clone(),
+        });
+        Ok(HttpResponseData {
+            status_code: self.status_code,
+            reason_phrase: self.reason_phrase.clone(),
+            elapsed_ms: 7,
+            size_bytes: self.body.len() as u64,
+            headers: vec![HttpHeader {
+                name: "content-type".into(),
+                value: "application/json".into(),
+            }],
+            body_raw: self.body.clone(),
+            body_pretty: rest_harness::domain::pretty_json(&self.body),
+        })
+    }
+}
+
+#[tokio::test]
+async fn engine_pipeline_loads_request_env_secrets_prepares_and_redacts_history() {
+    let (_dir, root) = sample_workspace();
+    let s = storage();
+    let col = s.create_collection(&root, "Api").unwrap();
+
+    // Request file on disk: {{base}} in the URL, {{token}} in a header.
+    let req = Request {
+        name: "List users".to_string(),
+        method: HttpMethod::Get,
+        url: "{{base}}/users?limit=5".to_string(),
+        headers: vec![KeyValueRow::new("Authorization", "Bearer {{token}}")],
+        ..Request::default()
+    };
+    let req_path = s.save_request(&col.path, &req).unwrap();
+
+    // Environment file: the `base` variable.
+    let mut env = Environment::new("Staging", PathBuf::new());
+    env.variables.insert(
+        "base".to_string(),
+        "https://staging.example.com".to_string(),
+    );
+    s.save_environment(&col.path, &env).unwrap();
+
+    // `.secrets.yaml`: the `token` secret.
+    let mut secrets = SecretStore::empty();
+    secrets
+        .shared
+        .insert("token".to_string(), "s3cr3t-token".to_string());
+    s.save_secrets(&col.path, &secrets).unwrap();
+
+    // Reload everything through the storage layer, as the app would.
+    let envs = s.load_environments(&col.path).unwrap();
+    assert_eq!(envs.len(), 1);
+    let secrets = s.load_secrets(&col.path).unwrap();
+    let loaded: Request = serde_yaml::from_str(&fs::read_to_string(&req_path).unwrap()).unwrap();
+
+    let variables = secrets.resolve_variables(Some(&envs[0]));
+    assert!(
+        missing_variables(&loaded, &variables).is_empty(),
+        "env+secrets must resolve every placeholder"
+    );
+
+    let prepared = prepare(&loaded, &variables).unwrap();
+    assert_eq!(prepared.url, "https://staging.example.com/users?limit=5");
+    assert!(prepared
+        .headers
+        .iter()
+        .any(|h| h.name == "Authorization" && h.value == "Bearer s3cr3t-token"));
+
+    // Send through the FAKE HttpClient.
+    let fake = FakeHttpClient {
+        status_code: 200,
+        reason_phrase: "OK".to_string(),
+        body: r#"{"users":[]}"#.to_string(),
+        captured: std::sync::Mutex::new(None),
+    };
+    let data = fake.execute(&prepared).await.unwrap();
+    let captured = fake.captured.lock().unwrap().clone().unwrap();
+    assert_eq!(captured.url, "https://staging.example.com/users?limit=5");
+    assert!(captured
+        .headers
+        .iter()
+        .any(|h| h.name == "Authorization" && h.value == "Bearer s3cr3t-token"));
+
+    // History entry built by the engine, appended with redaction.
+    let entry = build_history_entry(&prepared, &data);
+    HistoryStore::append_entry_at(&root, entry, &secrets.secret_values_for_env(None)).unwrap();
+
+    let raw = fs::read_to_string(root.join(HISTORY_FILE)).unwrap();
+    assert!(
+        !raw.contains("s3cr3t-token"),
+        "history file leaked the secret:\n{raw}"
+    );
+    assert!(raw.contains("***"));
+    assert!(raw.contains("https://staging.example.com/users?limit=5"));
+    assert!(raw.contains("Bearer ***"));
+
+    let entries = HistoryStore::load_at(&root).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].response.status_code, 200);
+    assert_eq!(entries[0].response.body, r#"{"users":[]}"#);
 }
