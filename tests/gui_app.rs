@@ -1,7 +1,7 @@
 //! Reducer + shell-equivalent tests for the GUI app core.
 //!
 //! These drive [`AppState::update`] and execute the returned [`Effect`]s
-//! against a real tempdir via [`FsWorkspaceStorage`] exactly like the iced
+//! against a real tempdir via [`FsWorkspaceStorage`] exactly like the gpui
 //! shell would, then feed the reload result back in via
 //! `Message::Workspace(WorkspaceMsg::Loaded(..))`.
 
@@ -15,7 +15,7 @@ use rest_harness::storage::{read_request, FsWorkspaceStorage, WorkspaceStorage};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Executes effects like the iced shell would (pure reducer + real storage).
+/// Executes effects like the gpui shell would (pure reducer + real storage).
 struct Harness {
     state: AppState,
     root: PathBuf,

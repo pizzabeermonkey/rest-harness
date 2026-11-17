@@ -1,9 +1,9 @@
 //! Request Composer state machines: tabs, editor edits, the send pipeline
 //! and the response viewer.
 //!
-//! Like the rest of [`crate::app`], this module contains **no `iced`
-//! types**. The `iced` shell (`src/gui/composer.rs`) renders [`Tab`]s and
-//! maps the returned [`Effect`]s to `iced::Task`s.
+//! Like the rest of [`crate::app`], this module contains **no GUI
+//! types**. The `gpui` shell (`src/gui/`) renders [`Tab`]s and maps the
+//! returned [`Effect`]s to async work.
 //!
 //! Overview:
 //! - A [`Tab`] is one open editor: a saved Request file
@@ -323,10 +323,7 @@ pub enum TabMsg {
 
 /// Messages driving the request editor and send pipeline of the ACTIVE
 /// tab (identified by `AppState::active_tab`).
-///
-/// `Eq` is not derivable (the `BodyEdit` variant carries `f32`
-/// coordinates).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComposerMsg {
     /// URL text changed; params re-sync from the URL.
     UrlChanged(String),
@@ -356,17 +353,11 @@ pub enum ComposerMsg {
     HeaderValueChanged(usize, String),
     /// Header description changed.
     HeaderDescriptionChanged(usize, String),
-    /// Body editor mode changed (None | JSON | Text).
-    BodyModeChanged(BodyMode),
-    /// The body text changed (the shell forwards the editor's full text).
-    BodyTextChanged(String),
-    /// Shell-side editor interaction forwarded to the shell-owned editor
-    /// content (see [`BodyEdit`]); the core reducer ignores this variant —
-    /// the shell intercepts it in its `update` before the reducer runs and
-    /// re-emits [`ComposerMsg::BodyTextChanged`] with the resulting text.
-    BodyEdit(BodyEdit),
-    /// Environment selection changed (also clears `send_error`).
-    EnvSelected(EnvSelection),
+    /// Save the active tab (Saved: upsert; Draft and HistoryDraft: open
+    /// the save-draft modal).
+    Save,
+    /// Copy the response body (per the active view) to the clipboard.
+    CopyBody,
     /// Select the editor sub-tab (Params / Headers / Body).
     SubTabSelected(SubTab),
     /// Select the response inspector tab (Headers / Body).
@@ -393,87 +384,16 @@ pub enum ComposerMsg {
         /// The sending tab.
         tab_id: u64,
     },
-    /// Save the active tab (Saved: upsert; Draft and HistoryDraft: open
-    /// the save-draft modal).
-    Save,
-    /// Copy the response body (per the active view) to the clipboard.
-    CopyBody,
+    /// Body editor mode changed (None | JSON | Text).
+    BodyModeChanged(BodyMode),
+    /// The body text changed (the shell forwards the editor's full text).
+    BodyTextChanged(String),
+    /// Environment selection changed (also clears `send_error`).
+    EnvSelected(EnvSelection),
     /// Open the Edit Environments modal for the active tab's Collection.
     OpenEditEnvironments,
     /// Open the Edit Secrets modal for the active tab's Collection.
     OpenEditSecrets,
-}
-
-/// Core-owned mirror of the iced text-editor action.
-///
-/// The shell's `on_edit` closure maps the (iced-typed) editor action into
-/// this iced-free enum; the shell `update` intercepts
-/// [`ComposerMsg::BodyEdit`], reconstructs the action, performs it on its
-/// per-tab editor content and forwards the resulting text to the reducer
-/// as [`ComposerMsg::BodyTextChanged`]. The core never sees iced types.
-///
-/// `Eq` is not derivable (the click/drag coordinates are `f32`).
-#[derive(Debug, Clone, PartialEq)]
-pub enum BodyEdit {
-    /// Insert a character.
-    Insert(char),
-    /// Paste text.
-    Paste(String),
-    /// Break the line.
-    Enter,
-    /// Indent the current line.
-    Indent,
-    /// Unindent the current line.
-    Unindent,
-    /// Delete backwards.
-    Backspace,
-    /// Delete forwards.
-    Delete,
-    /// Move the cursor.
-    Move(BodyMotion),
-    /// Select text with a motion.
-    Select(BodyMotion),
-    /// Select the word at the cursor.
-    SelectWord,
-    /// Select the line at the cursor.
-    SelectLine,
-    /// Select the entire buffer.
-    SelectAll,
-    /// Click at (x, y) widget coordinates.
-    Click { x: f32, y: f32 },
-    /// Drag to (x, y) widget coordinates.
-    Drag { x: f32, y: f32 },
-    /// Scroll by lines.
-    Scroll { lines: i32 },
-}
-
-/// Core-owned mirror of the iced cursor motion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BodyMotion {
-    /// Move left.
-    Left,
-    /// Move right.
-    Right,
-    /// Move up.
-    Up,
-    /// Move down.
-    Down,
-    /// Move to the left word boundary.
-    WordLeft,
-    /// Move to the right word boundary.
-    WordRight,
-    /// Move to the line start.
-    Home,
-    /// Move to the line end.
-    End,
-    /// Page up.
-    PageUp,
-    /// Page down.
-    PageDown,
-    /// Move to the text start.
-    DocumentStart,
-    /// Move to the text end.
-    DocumentEnd,
 }
 
 impl AppState {
@@ -627,9 +547,7 @@ impl AppState {
             ComposerMsg::BodyTextChanged(text) => {
                 if let Some(tab) = self.active_tab_mut() {
                     if let RequestBody::Raw { content, .. } = &mut tab.request.body {
-                        // Cursor-only editor interactions (Move/Click)
-                        // forward the unchanged text; only a real change
-                        // marks the tab dirty.
+                        // Only a real change marks the tab dirty.
                         if *content != text {
                             *content = text;
                             tab.dirty = true;
@@ -637,9 +555,6 @@ impl AppState {
                     }
                 }
             }
-            // Intercepted by the shell before the reducer; a no-op here so
-            // the arm stays exhaustive.
-            ComposerMsg::BodyEdit(_) => {}
             ComposerMsg::EnvSelected(env) => {
                 if let Some(tab) = self.active_tab_mut() {
                     tab.env = env;

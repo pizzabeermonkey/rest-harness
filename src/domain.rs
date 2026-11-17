@@ -520,10 +520,36 @@ pub struct Workspace {
 /// Pretty-print a JSON string, returning the input unchanged when it is not
 /// valid JSON. Provided so GUI/engine tasks can pretty-print request and
 /// response bodies without depending on `serde_json` directly.
+///
+/// Object keys are always emitted in sorted order: the `gpui` dependency
+/// tree enables serde_json's `preserve_order` feature (insertion-ordered
+/// maps), so the output is canonicalized explicitly to keep it
+/// deterministic and independent of the dependency graph.
 pub fn pretty_json(input: &str) -> String {
     serde_json::from_str::<serde_json::Value>(input)
+        .map(canonicalize_json)
         .and_then(|value| serde_json::to_string_pretty(&value))
         .unwrap_or_else(|_| input.to_string())
+}
+
+/// Rebuild `value` with object keys sorted (recursively); arrays keep
+/// their order. See [`pretty_json`].
+fn canonicalize_json(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<(String, serde_json::Value)> = map.into_iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut sorted = serde_json::Map::new();
+            for (key, value) in entries {
+                sorted.insert(key, canonicalize_json(value));
+            }
+            serde_json::Value::Object(sorted)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(canonicalize_json).collect())
+        }
+        other => other,
+    }
 }
 
 #[cfg(test)]

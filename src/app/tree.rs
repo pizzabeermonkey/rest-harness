@@ -1,6 +1,6 @@
 //! Filtered-tree projection for the Collections sidebar.
 //!
-//! [`SidebarNode`] is the pure view-model the iced shell renders: built from
+//! [`SidebarNode`] is the pure view-model the GUI shell renders: built from
 //! a [`Workspace`] plus an optional case-insensitive substring filter.
 //!
 //! Filter semantics:

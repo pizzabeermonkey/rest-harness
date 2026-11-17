@@ -1,12 +1,12 @@
 //! UI-agnostic GUI core: [`AppState`], [`Message`], [`Effect`] and the pure
 //! `update` reducer, plus the filtered-tree projection in [`tree`].
 //!
-//! This module contains **no `iced` types** — it is deliberately
-//! `iced`-free so the reducer and tree logic are unit-testable without a
-//! display. The `iced` shell (binary's `gui` module) owns the mapping:
+//! This module contains **no GUI types** — it is deliberately
+//! toolkit-free so the reducer and tree logic are unit-testable without a
+//! display. The `gpui` shell (binary's `gui` module) owns the mapping:
 //!
 //! ```text
-//! Message ──> AppState::update ──> Vec<Effect> ──> shell maps to Tasks ──> Messages
+//! Message ──> AppState::update ──> Vec<Effect> ──> shell runs effects ──> Messages
 //! ```
 //!
 //! Extension points for the next increment (Request composer):
@@ -17,7 +17,7 @@
 //!   [`AppState::last_opened`] — the composer consumes this to open the
 //!   clicked Request.
 //! - New shell-side work is expressed as new [`Effect`] variants; the shell
-//!   maps each to `iced::Task`s. After ANY successful CRUD effect the shell
+//!   maps each to async work. After ANY successful CRUD effect the shell
 //!   reloads the workspace from disk and sends
 //!   `Message::Workspace(WorkspaceMsg::Loaded(..))` — state must reflect
 //!   disk truth.
@@ -28,9 +28,8 @@ pub mod composer;
 pub mod tree;
 
 pub use self::composer::{
-    BodyEdit, BodyMode, BodyMotion, BodyView, ComposerMsg, EnvScope, EnvSelection, JsonToken,
-    JsonTokenKind, NameValue, PendingSave, ResponseState, ResponseView, StatusClass, SubTab, Tab,
-    TabKind, TabMsg,
+    BodyMode, BodyView, ComposerMsg, EnvScope, EnvSelection, JsonToken, JsonTokenKind, NameValue,
+    PendingSave, ResponseState, ResponseView, StatusClass, SubTab, Tab, TabKind, TabMsg,
 };
 
 use crate::config::SAMPLE_COLLECTION_NAME;
@@ -207,7 +206,7 @@ pub enum Message {
     Composer(ComposerMsg),
 }
 
-/// What `update` asks the shell to do; the shell maps each to `iced::Task`s
+/// What `update` asks the shell to do; the shell maps each to async work
 /// (blocking storage work + workspace reload) and reports the outcome via
 /// `Message::Workspace(WorkspaceMsg::Loaded(..))`.
 #[derive(Debug, Clone, PartialEq, Eq)]

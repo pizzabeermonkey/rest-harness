@@ -1,8 +1,8 @@
 //! REST Harness core: pure-Rust domain model and git-friendly YAML
 //! filesystem persistence (see `GLOSSARY.md` and `docs/adr/`).
 //!
-//! Downstream tasks (interpolation/HTTP engine, `iced` GUI) build on this
-//! crate's public API:
+//! Downstream tasks (interpolation/HTTP engine, the `gpui` GUI) build on
+//! this crate's public API:
 //! - [`domain`]: Workspace / Collection / Folder / Request / Environment /
 //!   SecretStore / HistoryEntry models.
 //! - [`storage`]: the [`storage::WorkspaceStorage`] port and its
@@ -12,8 +12,8 @@
 //! - [`history`]: gitignored History Entry store with Secret redaction.
 //! - [`app`]: UI-agnostic GUI core (`AppState` + `Message` + `Effect`
 //!   reducer, tree projection, CRUD/filter logic). This module — like the
-//!   rest of the crate — must stay free of `iced` types; the `iced` shell
-//!   lives in the binary's `gui` module (`src/gui/`).
+//!   rest of the crate — must stay free of GUI-toolkit types; the `gpui`
+//!   shell lives in the binary's `gui` module (`src/gui/`).
 
 pub mod app;
 pub mod config;
